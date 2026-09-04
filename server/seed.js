@@ -6,12 +6,12 @@ import { generateSuggestion } from './correction.js';
 const NOW = '2026-01-01T00:00:00.000Z';
 
 const PAYERS = [
-  { id: 'aetna', name: 'Aetna', id_format_regex: '^[A-Z]{2}-\\d{4}-[A-Z]$', readable_format: 'XX-NNNN-A', ucr_note: 'Out-of-network reimbursed at 70% of UCR; member balance-billed for the remainder.', sample_deductible: '$1,500 individual / $3,000 family' },
-  { id: 'uhc', name: 'UnitedHealthcare', id_format_regex: '^\\d{9}$', readable_format: 'NNNNNNNNN (9 digits)', ucr_note: 'Out-of-network UCR cap set at the 80th percentile; no balance-billing protection.', sample_deductible: '$750 individual / $1,500 family' },
-  { id: 'cigna', name: 'Cigna', id_format_regex: '^U\\d{8}$', readable_format: 'U + 8 digits', ucr_note: 'Out-of-network claims priced at 60% of billed charges vs. UCR, whichever is lower.', sample_deductible: '$2,000 individual / $4,000 family' },
-  { id: 'bcbs', name: 'BCBS', id_format_regex: '^[A-Z]{3}\\d{9}$', readable_format: 'AAA + 9 digits (12 chars)', ucr_note: 'Out-of-network reimbursed at 70% of UCR; member balance-billed for the remainder.', sample_deductible: '$2,000 individual / $4,000 family' },
-  { id: 'humana', name: 'Humana', id_format_regex: '^H\\d{8}$', readable_format: 'H + 8 digits', ucr_note: 'Out-of-network care reimbursed at 65% of UCR schedule.', sample_deductible: '$1,000 individual / $2,000 family' },
-  { id: 'kaiser', name: 'Kaiser', id_format_regex: '^\\d{10}$', readable_format: 'NNNNNNNNNN (10 digits)', ucr_note: 'Out-of-network care is not covered except emergencies — no UCR schedule applies.', sample_deductible: '$0 individual (HMO, in-network only)' },
+  { id: 'aetna', name: 'Aetna', id_format_regex: '^[A-Z]{2}-\\d{4}-[A-Z]$', readable_format: 'XX-NNNN-A', ucr_note: 'Out-of-network reimbursed at 70% of UCR; member balance-billed for the remainder.', sample_deductible: '₹1,24,500 individual / ₹2,49,000 family' },
+  { id: 'uhc', name: 'UnitedHealthcare', id_format_regex: '^\\d{9}$', readable_format: 'NNNNNNNNN (9 digits)', ucr_note: 'Out-of-network UCR cap set at the 80th percentile; no balance-billing protection.', sample_deductible: '₹62,250 individual / ₹1,24,500 family' },
+  { id: 'cigna', name: 'Cigna', id_format_regex: '^U\\d{8}$', readable_format: 'U + 8 digits', ucr_note: 'Out-of-network claims priced at 60% of billed charges vs. UCR, whichever is lower.', sample_deductible: '₹1,66,000 individual / ₹3,32,000 family' },
+  { id: 'bcbs', name: 'BCBS', id_format_regex: '^[A-Z]{3}\\d{9}$', readable_format: 'AAA + 9 digits (12 chars)', ucr_note: 'Out-of-network reimbursed at 70% of UCR; member balance-billed for the remainder.', sample_deductible: '₹1,66,000 individual / ₹3,32,000 family' },
+  { id: 'humana', name: 'Humana', id_format_regex: '^H\\d{8}$', readable_format: 'H + 8 digits', ucr_note: 'Out-of-network care reimbursed at 65% of UCR schedule.', sample_deductible: '₹83,000 individual / ₹1,66,000 family' },
+  { id: 'kaiser', name: 'Kaiser', id_format_regex: '^\\d{10}$', readable_format: 'NNNNNNNNNN (10 digits)', ucr_note: 'Out-of-network care is not covered except emergencies — no UCR schedule applies.', sample_deductible: '₹0 individual (HMO, in-network only)' },
 ];
 
 const CONFIRMED_PATIENTS = [

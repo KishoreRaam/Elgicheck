@@ -1,15 +1,15 @@
 // ===================== DATA =====================
 const PAYERS = [
   { name: 'Aetna PPO',        readable: '2 letters · 4 digits · 1 letter', example: 'AE-3082-A',    hint: 'Aetna format: XX-NNNN-A',              rule: 'Two alpha, four digits, one trailing alpha, dash-separated.', re: /^[A-Za-z]{2}-\d{4}-[A-Za-z]$/,
-    sample_deductible: '$1,500 individual / $3,000 family', out_of_network_ucr_note: 'Out-of-network reimbursed at 70% of UCR; member balance-billed for the remainder.' },
+    sample_deductible: '₹1,24,500 individual / ₹2,49,000 family', out_of_network_ucr_note: 'Out-of-network reimbursed at 70% of UCR; member balance-billed for the remainder.' },
   { name: 'UnitedHealthcare', readable: '9 digits',                        example: '493210087',     hint: 'UHC format: 9 digits',                 rule: 'Exactly nine numeric digits, no separators.',                 re: /^\d{9}$/ },
   { name: 'Cigna OAP',        readable: 'U + 8 digits',                    example: 'U40021398',     hint: 'Cigna format: U + 8 digits',           rule: 'Leading U followed by eight numeric digits.',                 re: /^[Uu]\d{8}$/,
-    sample_deductible: '$750 individual / $1,500 family', out_of_network_ucr_note: 'Out-of-network UCR cap set at the 80th percentile; no balance-billing protection.' },
+    sample_deductible: '₹62,250 individual / ₹1,24,500 family', out_of_network_ucr_note: 'Out-of-network UCR cap set at the 80th percentile; no balance-billing protection.' },
   { name: 'BCBS TX',          readable: '3 letters + 9 digits',            example: 'BCT004521190',  hint: 'BCBS format: 3-letter prefix + 9 digits', rule: 'Three-letter plan prefix then nine numeric digits.',       re: /^[A-Za-z]{3}\d{9}$/,
-    sample_deductible: '$2,000 individual / $4,000 family', out_of_network_ucr_note: 'Out-of-network claims priced at 60% of billed charges vs. UCR, whichever is lower.' },
+    sample_deductible: '₹1,66,000 individual / ₹3,32,000 family', out_of_network_ucr_note: 'Out-of-network claims priced at 60% of billed charges vs. UCR, whichever is lower.' },
   { name: 'Humana Gold',      readable: 'H + 8 digits',                    example: 'H55830921',     hint: 'Humana format: H + 8 digits',          rule: 'Leading H followed by eight numeric digits.',                 re: /^[Hh]\d{8}$/ },
   { name: 'Kaiser',           readable: '10 digits',                       example: '6120094475',    hint: 'Kaiser format: 10 digits',             rule: 'Exactly ten numeric digits, no separators.',                  re: /^\d{10}$/,
-    sample_deductible: '$0 individual (HMO, in-network only)', out_of_network_ucr_note: 'Out-of-network care is not covered except emergencies — no UCR schedule applies.' },
+    sample_deductible: '₹0 individual (HMO, in-network only)', out_of_network_ucr_note: 'Out-of-network care is not covered except emergencies — no UCR schedule applies.' },
 ];
 
 function seedPatients() {
@@ -103,6 +103,8 @@ function statusBadge(status) {
 // ===================== STATE =====================
 let state = {
   view: 'auth',
+  user: null,
+  apiStatus: 'offline',
   batch: 'idle',
   patients: [],
   form: { name: '', dob: '', payer: '', memberId: '' },
@@ -157,10 +159,51 @@ function getQueueRows() {
 
 function getFlaggedRecord() { return state.patients.find(p => p.id === state.selectedId) || null; }
 
+const API_BASE = window.location.protocol === 'file:' ? 'http://localhost:3001' : 'http://localhost:3001';
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(API_BASE + path, {
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    ...options,
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+  return body;
+}
+
+function normalizeApiPatients(rows) {
+  const localRows = seedPatients();
+  return rows.map((row, index) => {
+    const local = localRows.find(item => item.name === row.name) || {};
+    return {
+      ...local,
+      id: row.id || local.id || 'api-' + index,
+      mrn: row.id ? row.id.slice(-6) : local.mrn,
+      name: row.name,
+      dob: row.dob,
+      payer: row.payer_name || row.payer_id,
+      member: row.member_id,
+      status: row.status,
+      updated: row.updated_at ? relTime(new Date(row.updated_at).getTime()) : local.updated || 'just now',
+      ts: row.updated_at ? new Date(row.updated_at).getTime() : 0,
+      origin: 'backend',
+      diag: row.flag_field ? { field: row.flag_field, rule: row.flag_rule, expected: row.flag_expected, actual: row.flag_actual } : local.diag,
+      suggestion: row.flag_suggestion || local.suggestion,
+      suggested: local.suggested,
+    };
+  });
+}
+
 // ===================== ACTIONS =====================
-function loadBatch() {
+async function loadBatch() {
   setState({ batch: 'loading' });
-  setTimer('batch', () => setState({ batch: 'loaded', patients: seedPatients() }), 800);
+  try {
+    const rows = await apiRequest('/api/patients');
+    setState({ batch: 'loaded', patients: normalizeApiPatients(rows), apiStatus: 'online' });
+  } catch (error) {
+    setState({ batch: 'loaded', patients: seedPatients(), apiStatus: 'offline' });
+    pushToast('Backend unavailable', 'Showing the local 12-patient demo batch.', '#F59E0B');
+  }
 }
 function loadBatchFromQueue() { setState({ view: 'intake' }); loadBatch(); }
 
@@ -309,10 +352,12 @@ function doSort(key) {
 function getPaletteItems() {
   const q = state.paletteQuery.trim().toLowerCase();
   const navItems = [
+    { icon: '📖', title: 'Go to About', sub: 'The long-form story behind Verified', run: () => setState({ view: 'about', paletteOpen: false }) },
     { icon: '◎', title: 'Go to Overview', sub: 'The pitch, the pipeline, the why', run: () => setState({ view: 'overview', paletteOpen: false }) },
     { icon: '⌂', title: 'Go to Intake', sub: 'Load a batch or add a patient', run: () => setState({ view: 'intake', paletteOpen: false }) },
     { icon: '☰', title: 'Go to Queue', sub: 'Live eligibility status', run: () => setState({ view: 'queue', paletteOpen: false }) },
     { icon: '⚙', title: 'Go to Payer Config', sub: 'Member ID format reference + tester', run: () => setState({ view: 'config', paletteOpen: false }) },
+    { icon: '◉', title: 'Go to Practice Profile', sub: 'Revenue leakage and no-show signals', run: () => setState({ view: 'profile', paletteOpen: false }) },
   ];
   const navFiltered = q ? navItems.filter(n => n.title.toLowerCase().includes(q)) : navItems;
   const patientItems = state.patients
@@ -401,9 +446,11 @@ function paletteHtml() {
 // ===================== RENDER: SIDEBAR =====================
 const NAV_ICONS = {
   overview: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="3.5" cy="4.5" r="1.6"/><circle cx="14.5" cy="4.5" r="1.6"/><circle cx="9" cy="13.5" r="1.6"/><path d="M5.1 4.5h7.8M4.3 5.9l3.8 6.2M13.7 5.9l-3.8 6.2"/></svg>`,
+  about: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4.3C7.5 3.4 5.4 3.1 3.3 3.4v9.9c2.1-.3 4.2 0 5.7 1M9 4.3c1.5-.9 3.6-1.2 5.7-.9v9.9c-2.1-.3-4.2 0-5.7 1V4.3z"/></svg>`,
   intake: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11v2.3a1 1 0 001 1h9a1 1 0 001-1V11"/><path d="M9 2.8v7.4M9 10.2l-3-3M9 10.2l3-3"/></svg>`,
   queue: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h12M3 9h12M3 13h7.5"/></svg>`,
   config: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 13.2V9.6M4.5 6.4V3.2M9 13.2V7.8M9 5.4V3.2M13.5 13.2V10.6M13.5 8.2V3.2"/><circle cx="4.5" cy="7.9" r="1.6"/><circle cx="9" cy="6.6" r="1.6"/><circle cx="13.5" cy="9.4" r="1.6"/></svg>`,
+  profile: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6" r="2.7"/><path d="M3.4 15c.6-3.3 2.5-5 5.6-5s5 1.7 5.6 5"/></svg>`,
 };
 
 function sidebarProgress() {
@@ -431,6 +478,7 @@ function sidebarProgress() {
 function sidebarHtml() {
   const flaggedCount = state.patients.filter(p => p.status === 'flagged').length;
   const nav = [
+    { key: 'about', label: 'About' },
     { key: 'overview', label: 'Overview' },
     { key: 'intake', label: 'Intake' },
     { key: 'queue', label: 'Queue', badge: flaggedCount },
@@ -461,8 +509,14 @@ function sidebarHtml() {
       <kbd>⌘K</kbd>
     </div>
     <div class="sidebar-foot">
-      Front desk · Bay 3
+      <button class="sidebar-profile-btn${state.view === 'profile' ? ' active' : ''}" data-action="nav" data-view="profile">
+        <span class="sidebar-profile-avatar">AS</span>
+        <span class="sidebar-profile-copy"><b>Arjun Sharma</b><small>Practice admin</small></span>
+        <span class="sidebar-profile-arrow">→</span>
+      </button>
+      <div class="sidebar-foot-meta">Front desk · Bay 3
       <b>Demo build v1.0 · live</b>
+      </div>
     </div>
   </aside>`;
 }
@@ -472,16 +526,22 @@ function sidebarHtml() {
 // per-record breadcrumb on Flagged Detail are the same six steps, never redefined twice.
 const PIPELINE_STEPS = [
   { key: 'see', label: 'See', desc: 'Intake entered — batch or manual.',
+    long: 'Every record starts here — a batch ingested overnight, or a name typed in by hand at the front desk. Nothing is validated yet. This is just the record arriving.',
     icon: '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 9s2.7-4.5 7-4.5S16 9 16 9s-2.7 4.5-7 4.5S2 9 2 9z"/><circle cx="9" cy="9" r="2"/></svg>' },
   { key: 'extract', label: 'Extract', desc: 'Fields parsed: name, DOB, payer, Member ID.',
+    long: 'The four fields that matter get pulled out: patient name, date of birth, payer, and Member ID. No inference, no guessing — just what was actually entered.',
     icon: '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h-2a1 1 0 00-1 1v9a1 1 0 001 1h2M11.5 3.5h2a1 1 0 011 1v9a1 1 0 01-1 1h-2"/></svg>' },
   { key: 'crosscheck', label: 'Cross-check', desc: "Checked against the payer's format rules.",
+    long: "The Member ID gets tested against a deterministic regular expression — one per payer, six in total. Not a heuristic, not a model. A pattern match, the same way a form validator would.",
     icon: '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h7M3 9h5M3 13h5"/><path d="M12.5 11l1.5 1.5L17 9"/></svg>' },
   { key: 'flag', label: 'Flag', desc: 'Specific mismatch surfaced — never a silent guess.',
+    long: "A failed match doesn't get silently corrected or silently ignored. It gets surfaced, with the exact rule it broke and the exact character that broke it — visible, not buried in a queue.",
     icon: '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 2.5v13"/><path d="M4.5 3.5h8l-2 2.5 2 2.5h-8"/></svg>' },
   { key: 'confirm', label: 'Confirm', desc: 'A human approves the fix. Never a silent auto-correct.',
+    long: 'This is the one place AI enters the picture — and only to suggest, never to decide. A plausible correction is generated and shown with a character-level diff. A human reads it and chooses.',
     icon: '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="6.5"/><path d="M6.2 9.2l1.8 1.8 3.8-4"/></svg>' },
   { key: 'verify', label: 'Verify', desc: 'Re-checked against the rule — only then Confirmed.',
+    long: 'The confirmed value is re-run through the exact same deterministic check from Cross-check. Only a pass moves the record to Confirmed. The loop closes on a rule, not on trust.',
     icon: '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.3l5.5 2v4.4c0 3.8-2.4 6.2-5.5 7.1-3.1-.9-5.5-3.3-5.5-7.1V4.3l5.5-2z"/><path d="M6.4 9l1.8 1.8L11.6 7"/></svg>' },
 ];
 
@@ -489,7 +549,7 @@ function pipelineStripFull() {
   return `<div class="pipeline-strip">
     ${PIPELINE_STEPS.map((s, i) => `
       <div class="pipeline-step">
-        <div class="pipeline-node"><span class="pipeline-dot"></span></div>
+        <div class="pipeline-node"><span class="pipeline-fill"></span><span class="pipeline-dot"></span></div>
         <div class="feature-tile pipeline-card">
           <div class="pipeline-icon">${s.icon}</div>
           <h4>${i + 1}. ${escapeHtml(s.label)}</h4>
@@ -557,12 +617,163 @@ function overviewStatTeaser() {
   </div>`;
 }
 
+function practiceMetrics() {
+  const total = state.patients.length;
+  const flagged = state.patients.filter(p => p.status === 'flagged').length;
+  const confirmed = state.patients.filter(p => p.status === 'confirmed').length;
+  const estimatedLeakage = flagged * 2075;
+  const payerCounts = state.patients.reduce((counts, patient) => {
+    counts[patient.payer] = (counts[patient.payer] || 0) + 1;
+    return counts;
+  }, {});
+  const topPayer = Object.entries(payerCounts).sort((a, b) => b[1] - a[1])[0];
+  return { total, flagged, confirmed, estimatedLeakage, topPayer };
+}
+
+// The bars above are deterministic — counted straight off state.patients, same as every
+// other number on this page. This is the one place on the panel where AI enters: plain
+// language wrapped around those same numbers, split into "how to find it" (point at the
+// exact filter/sort that surfaces the pattern) and "how to fix it" (the one-click confirm
+// already sitting in Queue, plus the upstream change that stops it recurring).
+function leakageAiSuggestion(metrics) {
+  const badgeHead = `<div class="leakage-ai-head"><span class="ai-badge-icon"><i></i></span><span class="ai-badge-label">AI-generated suggestion</span></div>`;
+
+  if (!metrics.total) {
+    return `<div class="leakage-ai leakage-ai-empty">${badgeHead}
+      <p>Load a batch to get a suggestion — there's no queue data to diagnose yet.</p>
+    </div>`;
+  }
+  if (!metrics.flagged) {
+    return `<div class="leakage-ai leakage-ai-clean">${badgeHead}
+      <p>Every record currently in view is confirmed — no leakage pattern to chase right now. Re-check this after the next batch lands.</p>
+    </div>`;
+  }
+
+  const flaggedRate = Math.round((metrics.flagged / metrics.total) * 100);
+  const topPayerName = metrics.topPayer ? metrics.topPayer[0] : null;
+  const topPayerShare = (metrics.topPayer && metrics.total) ? Math.round((metrics.topPayer[1] / metrics.total) * 100) : 0;
+  const exposure = metrics.estimatedLeakage.toLocaleString('en-IN');
+  const n = metrics.flagged;
+
+  return `<div class="leakage-ai">${badgeHead}
+    <div class="leakage-ai-block">
+      <div class="leakage-ai-label">How to find it</div>
+      <p>${n} of ${metrics.total} records in view (${flaggedRate}%) are flagged for a malformed Member ID${topPayerName ? ` — <b>${escapeHtml(topPayerName)}</b> alone accounts for ${topPayerShare}% of the queue, so it's carrying the largest share of the ₹${exposure} exposure` : ''}. Open Queue, filter to Flagged, then sort by payer to see the same concentration yourself.</p>
+    </div>
+    <div class="leakage-ai-block">
+      <div class="leakage-ai-label">How to fix it</div>
+      <p>Confirm the AI-suggested corrections already waiting on those ${n} flagged record${n === 1 ? '' : 's'} — each is a one-click, character-level diff a human confirms before it re-verifies.${topPayerName ? ` Since ${escapeHtml(topPayerName)} is the concentration point, add its Member ID format as a front-desk intake check so this stops recurring instead of getting caught downstream.` : ''}</p>
+    </div>
+    <button class="btn btn-primary btn-sm leakage-ai-cta" data-action="nav" data-view="queue">Review ${n} flagged record${n === 1 ? '' : 's'} →</button>
+  </div>`;
+}
+
+function leakageSignals(compact = false) {
+  const metrics = practiceMetrics();
+  const exposure = metrics.estimatedLeakage.toLocaleString('en-IN');
+  const flaggedRate = metrics.total ? Math.round((metrics.flagged / metrics.total) * 100) : 0;
+  const confirmedRate = metrics.total ? Math.round((metrics.confirmed / metrics.total) * 100) : 0;
+  const topPayer = metrics.topPayer ? `${metrics.topPayer[0]} · ${metrics.topPayer[1]} records` : 'Waiting for intake data';
+  if (compact) return `<div class="signal-grid signal-grid-compact">
+    <div class="signal-card signal-card-risk"><div class="signal-card-kicker">Estimated leakage at risk</div><strong>₹${exposure}</strong><span>${metrics.flagged} flagged records × ₹2,075 avg rework</span></div>
+    <div class="signal-card"><div class="signal-card-kicker">No-show pattern</div><strong>6.9%</strong><span>86 of 1,248 visits · down 1.8 pts vs last month</span></div>
+    <div class="signal-card"><div class="signal-card-kicker">Clean intake rate</div><strong>${confirmedRate}%</strong><span>${metrics.confirmed} confirmed of ${metrics.total || 0} loaded records</span></div>
+  </div>`;
+  return `<div class="profile-insight-grid">
+    <div class="profile-panel profile-panel-leakage">
+      <div class="profile-panel-head"><div><div class="profile-kicker">Revenue leakage pattern</div><h2>Where money is slipping</h2></div><span class="profile-panel-icon">₹</span></div>
+      <div class="leakage-total"><strong>₹${exposure}</strong><span>estimated avoidable rework exposure</span></div>
+      <div class="leakage-bars">
+        <div class="leakage-row"><div><span>Malformed Member IDs</span><b>${metrics.flagged || 0}</b></div><div class="leakage-track"><i style="width:${Math.max(flaggedRate, 4)}%"></i></div><small>Primary intake leakage</small></div>
+        <div class="leakage-row"><div><span>Eligibility rework</span><b>₹${(metrics.flagged * 830).toLocaleString('en-IN')}</b></div><div class="leakage-track"><i class="secondary" style="width:${Math.max(Math.round(flaggedRate * .7), 4)}%"></i></div><small>Staff time and follow-up calls</small></div>
+        <div class="leakage-row"><div><span>Highest volume payer</span><b>${escapeHtml(topPayer)}</b></div><div class="leakage-track"><i class="tertiary" style="width:${metrics.total ? Math.max(Math.round((metrics.topPayer[1] / metrics.total) * 100), 4) : 4}%"></i></div><small>Prioritize format QA here first</small></div>
+      </div>
+      ${leakageAiSuggestion(metrics)}
+    </div>
+    <div class="profile-panel profile-panel-noshow">
+      <div class="profile-panel-head"><div><div class="profile-kicker">Attendance pattern</div><h2>No-show signal</h2></div><span class="profile-panel-icon profile-panel-icon-warn">↘</span></div>
+      <div class="noshow-hero"><strong>6.9%</strong><span>current no-show rate</span><em>−1.8 pts</em></div>
+      <div class="noshow-chart" aria-label="No-show rate trend: 8.7, 8.1, 7.5, 6.9 percent"><i style="height:72%"></i><i style="height:64%"></i><i style="height:52%"></i><i style="height:43%"></i><i style="height:35%"></i><i style="height:28%"></i></div>
+      <div class="noshow-meta"><span>86 no-shows / 1,248 visits</span><span>Last 6 months</span></div>
+      <p class="profile-note">Late reminders and unconfirmed appointments are the strongest operational pattern. Protect the slot before it becomes lost capacity.</p>
+    </div>
+  </div>`;
+}
+
+function viewProfile() {
+  const metrics = practiceMetrics();
+  return `<div class="view view-narrow profile-view">
+    <div class="profile-heading">
+      <div><div class="hero-eyebrow profile-eyebrow">PRACTICE PROFILE · LIVE SIGNALS</div><h1 class="page-title">Arjun Sharma</h1><p class="page-sub">Practice administrator · Bay 3 front desk · Operational view</p></div>
+      <button class="btn btn-secondary" data-action="nav" data-view="overview">Back to dashboard</button>
+    </div>
+    <div class="profile-identity">
+      <div class="profile-avatar-large">AS</div><div><strong>Northstar Family Practice</strong><span>Multi-specialty outpatient clinic · 4 providers</span></div><span class="profile-live"><i></i> Live data</span>
+    </div>
+    <div class="profile-kpi-grid">
+      <div class="profile-kpi"><span>Records in view</span><strong>${metrics.total}</strong><small>Current eligibility queue</small></div>
+      <div class="profile-kpi"><span>Leakage at risk</span><strong>₹${metrics.estimatedLeakage.toLocaleString('en-IN')}</strong><small>${metrics.flagged} records need review</small></div>
+      <div class="profile-kpi"><span>Clean intake rate</span><strong>${metrics.total ? Math.round((metrics.confirmed / metrics.total) * 100) : 0}%</strong><small>${metrics.confirmed} confirmed records</small></div>
+      <div class="profile-kpi"><span>No-show rate</span><strong>6.9%</strong><small>86 of 1,248 visits</small></div>
+    </div>
+    <div class="profile-section-head"><div><h2>Revenue and capacity signals</h2><p>Patterns that help the front desk act before a denial or empty slot appears.</p></div><span class="profile-benchmark">Demo benchmark + live queue</span></div>
+    ${leakageSignals()}
+    <div class="profile-actions"><div><strong>Next best actions</strong><span>Small operational changes with measurable upside.</span></div><button class="btn btn-primary" data-action="nav" data-view="queue">Review ${metrics.flagged} flagged records →</button><button class="btn btn-secondary" data-action="nav" data-view="intake">Run new intake check</button></div>
+  </div>`;
+}
+
+// ---- RCM Cycle Position: where Verified sits in the standard revenue cycle ----
+const RCM_CYCLE_STAGES = [
+  { label: 'Pre-Registration & Intake', zone: 'verified',
+    tip: 'This is where Verified operates — catching intake errors before they propagate downstream.' },
+  { label: 'Eligibility Verification', sub: 'EDI 270/271', zone: 'verified',
+    tip: 'This is where Verified operates — catching intake errors before they propagate downstream.' },
+  { label: 'Charge Capture & Coding', zone: 'muted',
+    tip: 'Procedure and diagnosis codes are assigned to the visit.' },
+  { label: 'Claim Submission', zone: 'muted',
+    tip: 'The claim is packaged and sent to the payer for adjudication.' },
+  { label: 'Payer Adjudication', zone: 'muted',
+    tip: "The payer reviews the claim against the policy and the payer's own coding rules." },
+  { label: 'Remittance / Denial', sub: 'CO-16 · CO-27 · CO-31', zone: 'denial',
+    tip: 'This is what Verified prevents — the same intake error, caught three weeks later as a denial instead of instantly at intake.' },
+  { label: 'Patient Billing & Collections', zone: 'muted',
+    tip: 'Any patient-responsibility balance is billed once the claim resolves.' },
+];
+
+function rcmStageCard(s) {
+  const cls = s.zone === 'verified' ? 'rcm-stage rcm-stage-verified' : s.zone === 'denial' ? 'rcm-stage rcm-stage-denial' : 'rcm-stage rcm-stage-muted';
+  const tag = s.zone === 'verified' ? '<div class="rcm-stage-tag">Verified operates here</div>'
+    : s.zone === 'denial' ? '<div class="rcm-stage-tag rcm-stage-tag-denial">Verified prevents this</div>' : '';
+  return `<div class="${cls}" data-tip="${escapeHtml(s.tip)}">
+    ${tag}
+    <div class="rcm-stage-label">${escapeHtml(s.label)}</div>
+    ${s.sub ? `<div class="rcm-stage-sub">${escapeHtml(s.sub)}</div>` : ''}
+  </div>`;
+}
+
+function rcmCycleSection() {
+  return `<div class="section-gap" style="margin-top:34px">
+    <div style="font-size:var(--fs-section-title);font-weight:600;letter-spacing:-.01em;margin-bottom:5px">Where Verified fits in the RCM cycle</div>
+    <div class="hint-text">Seven stages, one class of error — caught at the cheapest possible point instead of the most expensive one.</div>
+    <div class="rcm-cycle-wrap">
+      <div class="rcm-cycle-strip">
+        ${RCM_CYCLE_STAGES.map((s, i) => `${rcmStageCard(s)}${i < RCM_CYCLE_STAGES.length - 1 ? '<span class="rcm-connector">→</span>' : ''}`).join('')}
+      </div>
+      <svg class="rcm-loop-svg" viewBox="0 0 1000 90" preserveAspectRatio="none" aria-hidden="true">
+        <path class="rcm-loop-path" d="M 770 6 C 770 66, 165 66, 165 6" fill="none"></path>
+        <path class="rcm-loop-arrowhead" d="M 165 6 L 156 17 M 165 6 L 178 13" fill="none"></path>
+      </svg>
+      <div class="rcm-loop-label">Verified breaks this loop before it happens</div>
+    </div>
+  </div>`;
+}
+
 function viewOverview() {
   return `<div class="view">
     <div class="hero-band">
       <div class="hero-content">
         <div class="hero-eyebrow">AI-ASSISTED RCM ELIGIBILITY</div>
-        <h1 class="hero-title">Claim denials from bad intake data cost the average practice around $25 in rework per denial — most trace back to a mismatched Member ID or DOB caught weeks too late.</h1>
+        <h1 class="hero-title">Claim denials from bad intake data cost the average practice around ₹2,075 in rework per denial — most trace back to a mismatched Member ID or DOB caught weeks too late.</h1>
         <p class="hero-sub">Verified catches it right at intake, shows exactly what's wrong, and only fixes it once a human confirms — before it ever becomes a denial.</p>
         <div class="hero-actions">
           <button class="btn btn-primary" data-action="nav" data-view="intake">Try it yourself →</button>
@@ -576,9 +787,16 @@ function viewOverview() {
       </div>
     </div>
 
+    ${rcmCycleSection()}
+
     <div class="section-gap" style="margin-top:34px">
-      <div style="font-size:var(--fs-section-title);font-weight:600;letter-spacing:-.01em;margin-bottom:5px">How it works</div>
-      <div class="hint-text">Six steps, every one of them visible on screen — nothing happens to a patient record silently.</div>
+      <div class="pipeline-section-head">
+        <div>
+          <div style="font-size:var(--fs-section-title);font-weight:600;letter-spacing:-.01em;margin-bottom:5px">How it works</div>
+          <div class="hint-text">Six steps, every one of them visible on screen — nothing happens to a patient record silently. Scroll to trace one through.</div>
+        </div>
+        <div class="pipeline-progress-tag"><span class="pp-count">0</span>/6 steps</div>
+      </div>
       ${pipelineStripFull()}
     </div>
 
@@ -588,6 +806,8 @@ function viewOverview() {
     </div>
 
     ${overviewStatTeaser()}
+
+    ${leakageSignals(true)}
 
     <div class="section-gap" style="margin-top:34px;margin-bottom:0">
       <div style="font-size:var(--fs-section-title);font-weight:600;letter-spacing:-.01em;margin-bottom:5px">Why front-desk teams keep it</div>
@@ -613,6 +833,269 @@ function viewOverview() {
   </div>`;
 }
 
+// ===================== RENDER: ABOUT =====================
+// Deliberately a different layout grammar from Overview: no sidebar-visible card grid, no
+// stat tiles, no .view max-width/padding. Long-form, full-bleed, one scroll-driven idea per
+// section. Reuses PIPELINE_STEPS' data (not its markup) so the narrative never drifts out of
+// sync with the dashboard's own description of the same six stages.
+function aboutDiagramSvg() {
+  const h = 340, top = 24, bottom = 24, n = PIPELINE_STEPS.length;
+  const step = (h - top - bottom) / (n - 1);
+  const nodes = PIPELINE_STEPS.map((s, i) => {
+    const y = top + i * step;
+    return `<g class="about-node" data-idx="${i}">
+      <circle cx="20" cy="${y}" r="7"></circle>
+      <text x="38" y="${y + 4}">${escapeHtml(s.label)}</text>
+    </g>`;
+  }).join('');
+  return `<svg class="about-diagram" viewBox="0 0 190 ${h}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <line x1="20" y1="${top}" x2="20" y2="${h - bottom}" class="about-track"></line>
+    ${nodes}
+  </svg>`;
+}
+
+const ABOUT_ICON_PULSE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>';
+const ABOUT_ICON_HUB = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="9" r="2"/><circle cx="14" cy="4" r="2"/><circle cx="14" cy="14" r="2"/><path d="M6 8l6-3M6 10l6 3"/></svg>';
+const ABOUT_ICON_SHIELD = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.3l5.5 2v4.4c0 3.8-2.4 6.2-5.5 7.1-3.1-.9-5.5-3.3-5.5-7.1V4.3l5.5-2z"/><path d="M6.4 9l1.8 1.8L11.6 7"/></svg>';
+const ABOUT_ICON_CARD = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="14" height="10" rx="1.5"/><circle cx="6" cy="8" r="1.3"/><path d="M9.5 7.5h4.5M9.5 9.5h4.5M4 11.5h4"/></svg>';
+const ABOUT_ICON_NODEPS = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><path d="M4 4l10 10"/></svg>';
+const ABOUT_ICON_BOLT = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2L4.5 10.5h4L7.5 16 14 7h-4.5L10 2z"/></svg>';
+const ABOUT_ICON_CLOCK = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l3 2"/></svg>';
+const ABOUT_ICON_PERSON = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6" r="2.6"/><path d="M3.3 15c.6-3.6 3.1-5.2 5.7-5.2s5.1 1.6 5.7 5.2"/></svg>';
+
+// ===================== ABOUT PAGE: PROBLEM VS SOLUTION FLOW =====================
+// One seeded record — Ramirez, Elena / Aetna PPO / 8X-3082-A, the same flagged patient
+// from seedPatients() above — walked through both worlds side by side, so the "before"
+// half of this animation is literally the record sitting in the Queue right now.
+const ABOUT_FLOW_ICON_DOC = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2h5l3 3v11H5z"/><path d="M10 2v3h3"/></svg>';
+const ABOUT_FLOW_ICON_SEND = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 2L2 8.5l5.5 2L10 16l6-14z"/><path d="M7.5 10.5L16 2"/></svg>';
+const ABOUT_FLOW_ICON_X = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 4.5l9 9M13.5 4.5l-9 9"/></svg>';
+const ABOUT_FLOW_ICON_REDO = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 9a6 6 0 10-1.8 4.3"/><path d="M15 5v4h-4"/></svg>';
+const ABOUT_FLOW_ICON_FLAG = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16V2.5"/><path d="M4.5 3.5h9l-2 3 2 3h-9"/></svg>';
+const ABOUT_FLOW_ICON_SPARK = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.5l1.4 4.1 4.1 1.4-4.1 1.4L9 13.5l-1.4-4.1-4.1-1.4 4.1-1.4z"/></svg>';
+const ABOUT_FLOW_ICON_CHECK = '<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="6.5"/><path d="M6.2 9.2l1.8 1.8 3.8-4"/></svg>';
+
+const ABOUT_FLOW_TOP_STEPS = [
+  { icon: ABOUT_FLOW_ICON_DOC,   title: 'Intake entered',     sub: 'Aetna · ID 8X-3082-A',        tone: 'neutral' },
+  { icon: ABOUT_ICON_SHIELD,     title: 'Eligibility check',  sub: 'EDI 270/271 → Active ✓',      tone: 'pass' },
+  { icon: ABOUT_FLOW_ICON_SEND,  title: 'Claim submitted',    sub: 'Sent exactly as entered',     tone: 'neutral' },
+  { icon: ABOUT_ICON_CLOCK,      title: '~3 weeks later',     sub: 'No flag, no signal',          tone: 'delay' },
+  { icon: ABOUT_FLOW_ICON_X,     title: 'Claim denied',       sub: 'CO-16 · Missing/invalid',     tone: 'bad', tip: 'Rework cost ~₹2,075 · resolution 1–3 weeks' },
+  { icon: ABOUT_FLOW_ICON_REDO,  title: 'Manual rework',      sub: '₹2,075 avg · resolution begins', tone: 'rework' },
+];
+const ABOUT_FLOW_BOT_STEPS = [
+  { icon: ABOUT_FLOW_ICON_DOC,   title: 'Intake entered',   sub: 'Aetna · ID 8X-3082-A',     tone: 'navy' },
+  { icon: ABOUT_FLOW_ICON_FLAG,  title: 'Format flagged',   sub: 'Rules engine · instant',   tone: 'warn' },
+  { icon: ABOUT_FLOW_ICON_SPARK, title: 'AI explains fix',  sub: 'Plain language for staff', tone: 'cyan', tag: 'AI' },
+  { icon: ABOUT_FLOW_ICON_CHECK, title: 'Staff confirms',   sub: 'Corrected Member ID',      tone: 'navy' },
+  { icon: ABOUT_ICON_SHIELD,     title: 'Re-verified',      sub: 'Clean in seconds',         tone: 'good' },
+  { icon: ABOUT_FLOW_ICON_SEND,  title: 'Claim submitted',  sub: 'Same day · zero rework',   tone: 'cyan' },
+];
+const ABOUT_FLOW_CAPTIONS_LEFT = [
+  'Intake keyed in — the Member ID carries a formatting error no one can see.',
+  'Eligibility returns Active. It looks fine, because policy status was never the problem — format is.',
+  'The claim goes out with the bad Member ID.',
+  'Three weeks pass. No flag, no signal, no way to know.',
+  'Denied. CO-16: missing or invalid information.',
+  'Manual rework begins — roughly ₹2,075 and 1–3 weeks to resolve.',
+];
+const ABOUT_FLOW_CAPTIONS_RIGHT = [
+  'Intake keyed in — the same Member ID, the same hidden formatting error.',
+  'The rules engine catches the Member ID format the instant it is entered.',
+  'AI writes a plain-language explanation so staff know exactly what to fix.',
+  'Staff confirms the corrected Member ID in place.',
+  'Re-verified clean in seconds.',
+  'Claim submitted clean the same day — zero rework.',
+];
+
+function aboutFlowRow(steps, track) {
+  return `<div class="about-flow-grid" data-track="${track}">
+    <div class="about-flow-track-line"></div>
+    <div class="about-flow-track-progress" data-flow-progress="${track}"></div>
+    ${steps.map((s, i) => `
+      <div class="about-flow-node tone-${s.tone}" data-flow-node="${track}" data-idx="${i}" role="button" tabindex="0">
+        <div class="about-flow-circle-wrap">
+          <div class="about-flow-ring"></div>
+          <div class="about-flow-circle">${s.icon}</div>
+          ${s.tag ? `<div class="about-flow-tag">${escapeHtml(s.tag)}</div>` : ''}
+          ${s.tip ? `<div class="about-flow-tip">${escapeHtml(s.tip)}</div>` : ''}
+        </div>
+        <div class="about-flow-title">${escapeHtml(s.title)}</div>
+        <div class="about-flow-sub">${escapeHtml(s.sub)}</div>
+      </div>`).join('')}
+  </div>`;
+}
+
+function viewAboutFlow() {
+  return `<section class="about-flow">
+    <div class="about-flow-inner">
+      <div class="about-flow-head" data-reveal="up">
+        <div class="about-section-kicker">The cost of unverified intake</div>
+        <h2 class="about-section-heading">One intake. Two outcomes.</h2>
+        <p class="about-section-lead">The same patient record — Aetna, Member ID 8X-3082-A — carrying one hidden formatting error. Step through both worlds and watch exactly where they diverge.</p>
+      </div>
+
+      <div class="about-flow-tracks">
+        <div class="about-flow-band" data-flow-band><div class="about-flow-band-chip">Where it diverges</div></div>
+
+        <div class="about-flow-row">
+          <div class="about-flow-row-label is-muted"><span class="about-flow-row-dot"></span>Without Verified</div>
+          ${aboutFlowRow(ABOUT_FLOW_TOP_STEPS, 'top')}
+        </div>
+
+        <div class="about-flow-row">
+          <div class="about-flow-row-label is-accent"><span class="about-flow-row-dot"></span>With Verified</div>
+          ${aboutFlowRow(ABOUT_FLOW_BOT_STEPS, 'bot')}
+        </div>
+      </div>
+
+      <div class="about-flow-controls">
+        <button class="about-flow-play" data-flow-play type="button" hidden></button>
+        <div class="about-flow-scrub" data-flow-scrub>
+          <div class="about-flow-scrub-track"></div>
+          <div class="about-flow-scrub-fill" data-flow-scrub-fill></div>
+          <div class="about-flow-dots">
+            ${[1, 2, 3, 4, 5, 6].map(n => `<button class="about-flow-dot" data-flow-dot="${n}" type="button" aria-label="Step ${n}">${n}</button>`).join('')}
+          </div>
+        </div>
+      </div>
+
+      <div class="about-flow-captions">
+        <div class="about-flow-caption is-muted">
+          <div class="about-flow-caption-label">Without Verified</div>
+          <div class="about-flow-caption-text" data-flow-caption="top"></div>
+        </div>
+        <div class="about-flow-caption is-accent">
+          <div class="about-flow-caption-label">With Verified</div>
+          <div class="about-flow-caption-text" data-flow-caption="bot"></div>
+        </div>
+      </div>
+
+      <p class="about-flow-reduced-note" data-flow-reduced-note hidden>Reduced motion is on — showing the moment of divergence. Use the steps to compare.</p>
+    </div>
+  </section>`;
+}
+
+function viewAbout() {
+  return `<div class="about-page">
+
+    <section class="about-hero">
+      <div class="about-hero-inner" data-reveal="up">
+        <div class="about-mark">${ABOUT_ICON_PULSE}</div>
+        <p class="about-hero-line">Every eligibility check either confirms coverage —<br>or hides a mismatch that becomes a denial three weeks later.</p>
+        <p class="about-hero-sub">This is how Verified closes that gap.</p>
+      </div>
+      <div class="about-scroll-cue" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+      </div>
+    </section>
+
+    <section class="about-pipeline">
+      <div class="about-pipeline-grid">
+        <div class="about-pipeline-pin">
+          <div class="about-stage-tag">Stage <span class="about-stage-num">1</span> of ${PIPELINE_STEPS.length}</div>
+          <div class="about-stage-label">${escapeHtml(PIPELINE_STEPS[0].label)}</div>
+          ${aboutDiagramSvg()}
+        </div>
+        <div class="about-pipeline-scroll">
+          ${PIPELINE_STEPS.map((s, i) => `
+            <div class="about-stage-block" data-stage-index="${i}">
+              <div class="about-stage-icon">${s.icon}</div>
+              <div class="about-stage-eyebrow">0${i + 1} / 0${PIPELINE_STEPS.length}</div>
+              <h3 class="about-stage-heading">${escapeHtml(s.label)}</h3>
+              <p class="about-stage-body">${escapeHtml(s.long)}</p>
+            </div>`).join('')}
+        </div>
+      </div>
+    </section>
+
+    <section class="about-compare">
+      <div class="about-compare-grid">
+        <div class="about-compare-col is-muted" data-reveal="left">
+          <div class="about-compare-icon">${ABOUT_ICON_HUB}</div>
+          <div class="about-compare-label">What a clearinghouse check does</div>
+          <p>Sends an EDI 270 to the payer and gets a 271 back. Confirms the policy is active, the plan, the group.</p>
+          <p>It answers one question: is this person covered right now? It has no opinion on whether the Member ID you gave it was even typed correctly.</p>
+        </div>
+        <div class="about-compare-col is-accent" data-reveal="right">
+          <div class="about-compare-icon">${ABOUT_ICON_SHIELD}</div>
+          <div class="about-compare-label">What Verified adds</div>
+          <p>Catches the malformed Member ID <em>before</em> that 270 ever goes out — a bad request doesn't get a good answer, it gets rejected days later.</p>
+          <p>Shows the exact rule that broke, suggests a fix with a character-level diff, and waits for a human to confirm it. Nothing changes in the record silently.</p>
+        </div>
+      </div>
+    </section>
+
+    ${viewAboutFlow()}
+
+    <section class="about-payers">
+      <div class="about-payers-inner">
+        <div class="about-section-kicker" data-reveal="up">The rulebook</div>
+        <h2 class="about-section-heading" data-reveal="up">Six payers. Six patterns. Zero ambiguity.</h2>
+        <p class="about-section-lead" data-reveal="up">Every Member ID format below is a plain regular expression — not a model's best guess. If a payer changes its format, the fix is one line, not a retraining run.</p>
+        <div class="about-payer-grid" data-reveal="stagger-up">
+          ${PAYERS.map(p => `
+            <div class="about-payer-card">
+              <div class="about-payer-icon">${ABOUT_ICON_CARD}</div>
+              <div class="about-payer-name">${escapeHtml(p.name)}</div>
+              <div class="about-payer-format">${escapeHtml(p.readable)}</div>
+              <div class="about-payer-example">${escapeHtml(p.example)}</div>
+            </div>`).join('')}
+        </div>
+      </div>
+    </section>
+
+    <section class="about-boundary">
+      <div class="about-boundary-inner">
+        <p class="about-boundary-text" data-reveal="up"><b>Deterministic rules</b> decide <b>what</b> is wrong.<br>AI only decides <b>how</b> to explain it.</p>
+        <div class="about-boundary-diagram" data-reveal="draw">
+          <div class="about-bd-box about-bd-rules">Rules Engine</div>
+          <svg class="about-bd-arrow" viewBox="0 0 80 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 12h64M56 4l10 8-10 8"/></svg>
+          <div class="about-bd-box about-bd-suggestion">Suggestion</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="about-proof">
+      <div class="about-proof-inner">
+        <div class="about-section-kicker" data-reveal="up">Not a mockup</div>
+        <h2 class="about-section-heading" data-reveal="up">What you're looking at right now is the actual deployable artifact.</h2>
+        <div class="about-proof-grid" data-reveal="stagger-up">
+          <div class="about-proof-item">
+            <div class="about-proof-icon">${ABOUT_ICON_NODEPS}</div>
+            <h4>Zero dependencies</h4>
+            <p>No React, no bundler, no node_modules in the browser. One HTML file, one stylesheet, one script.</p>
+          </div>
+          <div class="about-proof-item">
+            <div class="about-proof-icon">${ABOUT_ICON_BOLT}</div>
+            <h4>Zero build step</h4>
+            <p>Open index.html, or serve the folder — that's the entire deploy story, on this machine or any other.</p>
+          </div>
+          <div class="about-proof-item">
+            <div class="about-proof-icon">${ABOUT_ICON_CLOCK}</div>
+            <h4>Real audit trail</h4>
+            <p>Every verification attempt — pass or fail — is timestamped on the record the moment it happens, not reconstructed after.</p>
+          </div>
+          <div class="about-proof-item">
+            <div class="about-proof-icon">${ABOUT_ICON_PERSON}</div>
+            <h4>Human confirms every fix</h4>
+            <p>The suggestion never applies itself. Not once, not by default, not after a timeout. A person clicks confirm.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="about-close">
+      <div data-reveal="up">
+        <div class="about-mark about-mark-sm">${ABOUT_ICON_PULSE}</div>
+        <p class="about-close-line">See it catch a real mismatch.</p>
+        <button class="btn btn-primary" data-action="nav" data-view="intake">Load the demo batch →</button>
+      </div>
+    </section>
+
+  </div>`;
+}
+
 // ===================== RENDER: INTAKE =====================
 const ICON_CHECK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>';
 const ICON_WARN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5.3v3.6"/><circle cx="8" cy="11.2" r="0.15" fill="currentColor" stroke-width="2.6"/></svg>';
@@ -622,8 +1105,28 @@ function fieldCheck(status) {
   return '';
 }
 
+function clearIntakeForm() {
+  setState({ form: { name: '', dob: '', payer: '', memberId: '' }, err: {}, submitting: false });
+}
+
+function intakeWorkspaceSummary() {
+  const total = state.patients.length;
+  const flagged = state.patients.filter(p => p.status === 'flagged').length;
+  const confirmed = state.patients.filter(p => p.status === 'confirmed').length;
+  const recent = [...state.patients].sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 5);
+  return { total, flagged, confirmed, recent };
+}
+
+function intakeActivity(summary) {
+  if (!summary.recent.length) return `<div class="intake-empty-activity"><span class="intake-empty-icon">↗</span><strong>No intake activity yet</strong><p>Load the seeded batch or verify a patient manually to start the audit stream.</p></div>`;
+  return `<div class="intake-activity-list">${summary.recent.map(p => `<div class="intake-activity-item">
+    <span class="intake-activity-dot ${p.status}"></span><div><strong>${escapeHtml(p.name)}</strong><span>${escapeHtml(p.payer)} · ${escapeHtml(p.member)}</span></div>${statusBadge(p.status)}
+  </div>`).join('')}</div>`;
+}
+
 function viewIntake() {
   const { batch, form, err, submitting } = state;
+  const summary = intakeWorkspaceSummary();
   const def = PAYERS.find(p => p.name === form.payer);
   const nameValid = form.name.trim().length > 0;
   const dobValid = !!form.dob;
@@ -631,12 +1134,17 @@ function viewIntake() {
   const midTrim = form.memberId.trim();
   const midStatus = def && midTrim ? (def.re.test(midTrim) ? 'valid' : 'invalid') : null;
   const stepsDone = [nameValid, dobValid, payerValid, midStatus === 'valid'].filter(Boolean).length;
-  return `<div class="view view-narrow">
-    <div class="view-header">
-      <h1 class="page-title">Intake</h1>
-      <p class="page-sub">Load a batch for verification, or enter a patient manually.</p>
+  return `<div class="view intake-view">
+    <div class="intake-topbar"><div class="view-header"><div class="hero-eyebrow intake-eyebrow">INTAKE WORKSPACE · ${state.apiStatus === 'online' ? 'BACKEND CONNECTED' : 'DEMO FALLBACK'}</div><h1 class="page-title">Intake</h1><p class="page-sub">Load a batch for verification, or enter a patient manually.</p></div><div class="intake-health"><i class="${state.apiStatus === 'online' ? 'online' : 'offline'}"></i><span>${state.apiStatus === 'online' ? 'SQLite queue connected' : 'Local queue active'}</span></div></div>
+    <div class="intake-stat-grid">
+      <div class="intake-stat"><span>Records loaded</span><strong>${summary.total}</strong><small>${batch === 'loading' ? 'Ingesting now…' : 'Ready for review'}</small></div>
+      <div class="intake-stat intake-stat-warn"><span>Needs review</span><strong>${summary.flagged}</strong><small>Format or policy flags</small></div>
+      <div class="intake-stat intake-stat-good"><span>Confirmed</span><strong>${summary.confirmed}</strong><small>Passed verification</small></div>
+      <div class="intake-stat"><span>Fields checked</span><strong>4</strong><small>Name · DOB · payer · ID</small></div>
     </div>
-    <div class="two-col" style="grid-template-columns:1fr 1fr">
+    <div class="intake-layout">
+      <div class="intake-main-column">
+      <div class="two-col intake-forms">
       <div class="card">
         <div class="card-head">
           <div class="card-title">Load seeded batch</div>
@@ -722,12 +1230,12 @@ function viewIntake() {
           <button class="btn btn-primary btn-block" data-action="submitIntake" ${submitting ? 'disabled' : ''}>
             ${submitting ? `<span class="spinner"></span> Checking eligibility…` : 'Verify eligibility'}
           </button>
+          <button class="btn btn-ghost btn-block intake-clear-btn" data-action="clearIntakeForm" type="button">Clear form</button>
           <div class="hint-text" style="margin-top:11px">Tip: an ID matching the payer format clears instantly (watch the check mark); anything else routes to Flagged Detail with an AI-suggested fix.</div>
         </div>
       </div>
-    </div>
-
-    <div class="feature-strip">
+      </div>
+      <div class="intake-feature-rail">
       <div class="feature-tile">
         <div class="fi"><i></i></div>
         <h4>Real-time payer rules</h4>
@@ -743,6 +1251,12 @@ function viewIntake() {
         <h4>Full audit trail</h4>
         <p>Every verification attempt is timestamped and kept with the record, from ingestion to confirmation.</p>
       </div>
+      </div>
+      </div>
+      <aside class="intake-side-column">
+        <div class="card intake-activity-card"><div class="card-head"><div class="card-title">Recent intake activity</div><div class="card-subtitle">Latest records in the verification stream.</div></div><div class="card-body">${intakeActivity(summary)}</div></div>
+        <div class="intake-checklist"><div class="profile-kicker">What gets checked</div><h3>Every record follows the same four gates.</h3><div class="intake-check-item"><i>1</i><span><b>Identity fields</b><small>Name and date of birth are present.</small></span></div><div class="intake-check-item"><i>2</i><span><b>Payer pattern</b><small>Member ID matches the selected payer format.</small></span></div><div class="intake-check-item"><i>3</i><span><b>Human review</b><small>Flagged corrections never apply silently.</small></span></div></div>
+      </aside>
     </div>
   </div>`;
 }
@@ -1174,7 +1688,7 @@ function viewAuth() {
   </div>`;
 }
 
-function authShowSuccess() {
+function authShowSuccess(user) {
   const rightPanel = root.querySelector('.auth-right');
   if (!rightPanel) return;
   const overlay = document.createElement('div');
@@ -1185,7 +1699,12 @@ function authShowSuccess() {
     gsap.fromTo(overlay, { opacity: 0 }, { opacity: 1, duration: .15 });
     gsap.fromTo(overlay.querySelector('.auth-success-check'), { scale: 0, opacity: 0 }, { scale: 1, opacity: 1, duration: .35, ease: 'back.out(2.4)', delay: .05 });
   }
-  setTimeout(() => { authBusy = false; setState({ view: 'overview' }); }, 480);
+  setTimeout(() => {
+    authBusy = false;
+    localStorage.setItem('verified_user', JSON.stringify(user));
+    setState({ view: 'overview', user });
+    loadBatch();
+  }, 480);
 }
 
 function mountAuthScreen() {
@@ -1227,8 +1746,8 @@ function mountAuthScreen() {
 // ===================== APP ROOT =====================
 function App() {
   if (state.view === 'auth') return `${viewAuth()}${toastStack()}`;
-  const views = { overview: viewOverview, intake: viewIntake, queue: viewQueue, flagged: viewFlagged, config: viewConfig };
-  const view = views[state.view] || viewOverview;
+  const views = { about: viewAbout, overview: viewOverview, profile: viewProfile, intake: viewIntake, queue: viewQueue, flagged: viewFlagged, config: viewConfig };
+  const view = views[state.view] || viewAbout;
   return `${sidebarHtml()}<main>${view()}</main>${drawerHtml()}${toastStack()}${paletteHtml()}`;
 }
 
@@ -1275,6 +1794,7 @@ const Actions = {
   goQueue() { setState({ view: 'queue' }); },
   backToQueue() { setState({ view: 'queue', selectedId: null, detail: null }); },
   submitIntake() { submitIntake(); },
+  clearIntakeForm() { clearIntakeForm(); },
   sort(el) { doSort(el.dataset.key); },
   filter(el) { setState({ filter: el.dataset.filter }); },
   rowClick(el) {
@@ -1337,7 +1857,7 @@ const Actions = {
     if (window.gsap) gsap.fromTo(el, { scale: .7 }, { scale: 1, duration: .22, ease: 'back.out(2.5)' });
   },
 
-  authSubmit(el) {
+  async authSubmit(el) {
     if (authBusy) return;
     const form = el.closest('form.auth-form');
     const mode = form.dataset.mode;
@@ -1363,13 +1883,30 @@ const Actions = {
 
     authBusy = true;
     el.disabled = true;
-    el.innerHTML = '<span class="spinner"></span>';
-    setTimeout(() => authShowSuccess(), 900);
+    el.innerHTML = '<span class="spinner"></span> Connecting…';
+    const payload = Object.fromEntries(names.map(n => [n, form.querySelector(`[name="${n}"]`).value.trim()]));
+    try {
+      const result = await apiRequest(mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      authShowSuccess(result.user);
+    } catch (error) {
+      authBusy = false;
+      el.disabled = false;
+      el.textContent = mode === 'signup' ? 'Create Account' : 'Sign In';
+      const passwordWrap = form.querySelector('[name="password"]').closest('.fl-field');
+      passwordWrap.classList.add('has-err');
+      passwordWrap.querySelector('.fl-err-msg').textContent = 'Backend is offline. Start the server on port 3001 and try again.';
+    }
   },
 
   authSkip() {
     if (authBusy) return;
-    setState({ view: 'overview' });
+    const user = { name: 'Arjun Sharma', email: 'demo@northstar.example', role: 'Practice administrator', practice: 'Northstar Family Practice' };
+    localStorage.setItem('verified_user', JSON.stringify(user));
+    setState({ view: 'overview', user });
+    loadBatch();
   },
 };
 
@@ -1426,22 +1963,385 @@ window.addEventListener('keydown', (e) => {
 // incidental re-renders while already there — loading a batch, a toast, anything —
 // don't replay the whole hero fade-in on top of itself.
 let overviewAnimated = false;
+if (window.gsap && window.ScrollTrigger) gsap.registerPlugin(ScrollTrigger);
+
+// ---- "How it works" scroll-scrubbed progress ----
+// Re-created on every DOM rebuild while on Overview (not gated by overviewAnimated) because
+// render() replaces #app's innerHTML wholesale — any ScrollTrigger bound to the old nodes
+// goes stale the instant a toast or other incidental re-render swaps them out. It's stateless
+// (driven entirely by the strip's current position in the viewport), so killing and
+// re-creating it on every rebuild just resumes at the same scroll position, no discontinuity.
+let pipelineScrollTrigger = null;
+function teardownPipelineScroll() {
+  if (pipelineScrollTrigger) { pipelineScrollTrigger.kill(); pipelineScrollTrigger = null; }
+}
+function applyPipelineProgress(steps, countEl, progress) {
+  const n = steps.length;
+  const raw = progress * n;
+  steps.forEach((stepEl, i) => {
+    const local = Math.max(0, Math.min(1, raw - i));
+    const fill = stepEl.querySelector('.pipeline-fill');
+    if (fill) fill.style.width = (local * 100) + '%';
+    stepEl.classList.toggle('is-done', local >= 0.999);
+    stepEl.classList.toggle('is-active', local > 0 && local < 0.999);
+  });
+  if (countEl) countEl.textContent = String(Math.min(n, Math.max(0, Math.ceil(raw))));
+}
+function setupPipelineScroll() {
+  teardownPipelineScroll();
+  const strip = root.querySelector('.pipeline-strip');
+  if (!strip) return;
+  const steps = Array.from(strip.querySelectorAll('.pipeline-step'));
+  const countEl = root.querySelector('.pp-count');
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    applyPipelineProgress(steps, countEl, 1);
+    return;
+  }
+  if (!window.gsap || !window.ScrollTrigger) { applyPipelineProgress(steps, countEl, 1); return; }
+  // `end` is a function (re-evaluated on every ScrollTrigger.refresh) rather than the plain
+  // 'bottom 25%' string, because that string is viewport-relative while the page's actual max
+  // scroll position is not — on a short page or a tall viewport "25% from the bottom" can land
+  // past the last pixel the browser will ever let you scroll to, so progress caps below 1 and
+  // the counter gets stuck one step short forever. Clamping to maxScroll guarantees it's reachable.
+  pipelineScrollTrigger = ScrollTrigger.create({
+    trigger: strip,
+    start: 'top 85%',
+    end: () => {
+      const rect = strip.getBoundingClientRect();
+      const desired = rect.bottom + window.scrollY - 0.25 * window.innerHeight;
+      const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+      return Math.min(desired, maxScroll - 10);
+    },
+    scrub: 0.35,
+    onUpdate: (self) => applyPipelineProgress(steps, countEl, self.progress),
+  });
+}
+
+// ---- RCM Cycle loop-arrow: draws in once, the first time it scrolls into view ----
+// Unlike the pipeline scrub above, this isn't scroll-linked — it's a one-shot reveal
+// (Framer Motion's whileInView + viewport:{once:true} is the spec's own reference point;
+// this project has no Framer Motion, so a plain IntersectionObserver gives the identical
+// "animate once on intersect, never again" semantics without adding a dependency).
+let rcmLoopObserver = null;
+function teardownRcmLoop() {
+  if (rcmLoopObserver) { rcmLoopObserver.disconnect(); rcmLoopObserver = null; }
+}
+function setupRcmLoop() {
+  teardownRcmLoop();
+  const wrap = root.querySelector('.rcm-cycle-wrap');
+  const path = root.querySelector('.rcm-loop-path');
+  if (!wrap || !path) return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || !window.gsap || !('IntersectionObserver' in window)) {
+    return; // no dasharray applied — path renders fully drawn/static, never invisible
+  }
+  const len = path.getTotalLength ? path.getTotalLength() : 900;
+  gsap.set(path, { strokeDasharray: len, strokeDashoffset: len });
+  rcmLoopObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      rcmLoopObserver.unobserve(entry.target);
+      gsap.to(path, {
+        strokeDashoffset: 0, duration: 1, ease: 'power2.inOut',
+        // draws in as one solid stroke (the reliable version of this trick), then settles
+        // back into the CSS dashed pattern once the reveal finishes — dashed at rest,
+        // solid mid-draw, which reads fine since the draw only takes ~1s.
+        onComplete: () => gsap.set(path, { strokeDasharray: '7 5', strokeDashoffset: 0 }),
+      });
+    });
+  }, { threshold: 0.4 });
+  rcmLoopObserver.observe(wrap);
+}
+
 if (typeof MutationObserver !== 'undefined') {
   const overviewEntranceObserver = new MutationObserver(() => {
-    if (state.view !== 'overview') { overviewAnimated = false; return; }
-    if (overviewAnimated) return;
+    if (state.view !== 'overview') { overviewAnimated = false; teardownPipelineScroll(); teardownRcmLoop(); return; }
     const strip = root.querySelector('.pipeline-strip');
     if (!strip) return;
+    setupPipelineScroll();
+    setupRcmLoop();
+    if (overviewAnimated) return;
     overviewAnimated = true;
     if (window.gsap) {
       gsap.from('.hero-eyebrow, .hero-title, .hero-sub, .hero-actions, .hero-chips', { opacity: 0, y: 14, duration: .5, stagger: .07, ease: 'power2.out' });
-      gsap.from('.pipeline-step', { opacity: 0, y: 16, duration: .45, stagger: .07, delay: .34, ease: 'power2.out' });
-      gsap.from('.callout-box', { opacity: 0, y: 10, duration: .4, delay: .78, ease: 'power2.out' });
-      gsap.from('.overview-cta-row, .stat-band', { opacity: 0, y: 10, duration: .4, delay: .9, ease: 'power2.out' });
-      gsap.from('.view > .section-gap:last-child .feature-tile', { opacity: 0, y: 12, duration: .4, stagger: .06, delay: 1.02, ease: 'power2.out' });
+      gsap.from('.callout-box', { opacity: 0, y: 10, duration: .4, delay: .5, ease: 'power2.out' });
+      gsap.from('.overview-cta-row, .stat-band', { opacity: 0, y: 10, duration: .4, delay: .62, ease: 'power2.out' });
+      gsap.from('.view > .section-gap:last-child .feature-tile', { opacity: 0, y: 12, duration: .4, stagger: .06, delay: .74, ease: 'power2.out' });
     }
   });
   overviewEntranceObserver.observe(root, { childList: true });
+}
+
+// ===================== ABOUT PAGE SCROLL BEHAVIOR =====================
+// Same additive philosophy as the Overview observer above: nothing here touches render(),
+// Actions, or existing listeners. The left-column "pin" in Section 2 is pure CSS
+// position:sticky (see .about-pipeline-pin) — there is no GSAP pin/scrub and no locked
+// scroll here, so this only ever *reads* scroll position via IntersectionObserver, never
+// controls it. Reduced-motion users get every section at full, static visibility with
+// zero observers attached — content is never pre-hidden waiting for a trigger that won't fire.
+let aboutStagesObserver = null;
+function teardownAboutStages() {
+  if (aboutStagesObserver) { aboutStagesObserver.disconnect(); aboutStagesObserver = null; }
+}
+function setupAboutStages() {
+  teardownAboutStages();
+  const blocks = Array.from(root.querySelectorAll('.about-stage-block'));
+  if (!blocks.length) return;
+  const countEl = root.querySelector('.about-stage-num');
+  const labelEl = root.querySelector('.about-stage-label');
+  const nodes = Array.from(root.querySelectorAll('.about-node'));
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function setActive(idx) {
+    if (countEl) countEl.textContent = String(idx + 1);
+    if (labelEl) labelEl.textContent = PIPELINE_STEPS[idx].label;
+    nodes.forEach((n, i) => {
+      n.classList.toggle('is-active', i === idx);
+      n.classList.toggle('is-done', i < idx);
+    });
+  }
+
+  if (reduced || !('IntersectionObserver' in window)) {
+    setActive(blocks.length - 1);
+    return;
+  }
+
+  aboutStagesObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      const idx = Number(entry.target.dataset.stageIndex);
+      if (!entry.isIntersecting) return;
+      setActive(idx);
+      if (window.gsap && !entry.target.dataset.revealed) {
+        entry.target.dataset.revealed = '1';
+        gsap.from(entry.target.querySelectorAll('.about-stage-eyebrow, .about-stage-heading, .about-stage-body'),
+          { opacity: 0, y: 18, duration: .5, stagger: .06, ease: 'power2.out' });
+      }
+    });
+  }, { threshold: 0.5 });
+  blocks.forEach((b) => aboutStagesObserver.observe(b));
+}
+
+let aboutRevealObserver = null;
+function teardownAboutReveals() {
+  if (aboutRevealObserver) { aboutRevealObserver.disconnect(); aboutRevealObserver = null; }
+}
+function setupAboutReveals() {
+  teardownAboutReveals();
+  const targets = Array.from(root.querySelectorAll('[data-reveal]'));
+  if (!targets.length) return;
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduced || !window.gsap || !('IntersectionObserver' in window)) return; // leave at natural full visibility
+
+  aboutRevealObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      const el = entry.target;
+      aboutRevealObserver.unobserve(el);
+      const type = el.dataset.reveal;
+      if (type === 'up') {
+        gsap.from(el, { opacity: 0, y: 24, duration: .6, ease: 'power2.out' });
+      } else if (type === 'left') {
+        gsap.from(el, { opacity: 0, x: -36, duration: .6, ease: 'power2.out' });
+      } else if (type === 'right') {
+        gsap.from(el, { opacity: 0, x: 36, duration: .6, ease: 'power2.out' });
+      } else if (type === 'stagger-up') {
+        gsap.from(el.children, { opacity: 0, y: 20, duration: .5, stagger: .06, ease: 'power2.out' });
+      } else if (type === 'draw') {
+        gsap.from(el.querySelectorAll('.about-bd-box'), { opacity: 0, y: 10, duration: .4, stagger: .15, ease: 'power2.out' });
+        const path = el.querySelector('.about-bd-arrow path');
+        if (path && path.getTotalLength) {
+          const len = path.getTotalLength();
+          gsap.set(path, { strokeDasharray: len, strokeDashoffset: len });
+          gsap.to(path, { strokeDashoffset: 0, duration: .7, delay: .25, ease: 'power2.inOut' });
+        }
+      }
+    });
+  }, { threshold: 0.35 });
+  targets.forEach((el) => aboutRevealObserver.observe(el));
+}
+
+// ---- "Problem vs Solution" flow: autoplaying step-through, two tracks ----
+// State lives in module variables (not `state`/setState) for the same reason the scroll
+// trigger above does: root.innerHTML gets replaced wholesale on every render(), so anything
+// that lived only on the old DOM nodes — or that drove a full app re-render per animation
+// tick — would either vanish or make this janky. A plain interval mutating the current DOM
+// directly, restored to the right visual step on rebuild, is what survives that.
+let aboutFlowActive = 1;
+let aboutFlowPlaying = false;
+let aboutFlowUserPaused = false;
+let aboutFlowTimer = null;
+let aboutFlowVisibilityObserver = null;
+let aboutFlowDragging = false;
+
+function aboutFlowReducedMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function aboutFlowOnMove(e) { if (aboutFlowDragging) aboutFlowScrubTo(e.clientX); }
+function aboutFlowOnUp() {
+  aboutFlowDragging = false;
+  window.removeEventListener('pointermove', aboutFlowOnMove);
+  window.removeEventListener('pointerup', aboutFlowOnUp);
+}
+
+function teardownAboutFlow() {
+  clearInterval(aboutFlowTimer);
+  aboutFlowTimer = null;
+  if (aboutFlowVisibilityObserver) { aboutFlowVisibilityObserver.disconnect(); aboutFlowVisibilityObserver = null; }
+  window.removeEventListener('pointermove', aboutFlowOnMove);
+  window.removeEventListener('pointerup', aboutFlowOnUp);
+  aboutFlowDragging = false;
+}
+
+function aboutFlowRender() {
+  const section = root.querySelector('.about-flow');
+  if (!section) return;
+  const n = aboutFlowActive;
+  const fillPct = (83.334 * (n - 1) / 5).toFixed(2) + '%';
+
+  section.querySelectorAll('[data-flow-progress]').forEach(el => { el.style.width = fillPct; });
+  section.querySelectorAll('[data-flow-node]').forEach(el => {
+    const idx = Number(el.dataset.idx) + 1;
+    el.classList.toggle('is-active', idx === n);
+    el.classList.toggle('is-done', idx < n);
+  });
+
+  const band = section.querySelector('[data-flow-band]');
+  if (band) band.classList.toggle('is-visible', n === 2);
+
+  section.querySelectorAll('[data-flow-dot]').forEach(d => {
+    const dn = Number(d.dataset.flowDot);
+    d.classList.toggle('is-active', dn === n);
+    d.classList.toggle('is-done', dn < n);
+  });
+  const scrubFill = section.querySelector('[data-flow-scrub-fill]');
+  if (scrubFill) scrubFill.style.width = `calc((100% - 30px) * ${(n - 1) / 5})`;
+
+  const topCap = section.querySelector('[data-flow-caption="top"]');
+  const botCap = section.querySelector('[data-flow-caption="bot"]');
+  if (topCap) topCap.textContent = ABOUT_FLOW_CAPTIONS_LEFT[n - 1];
+  if (botCap) botCap.textContent = ABOUT_FLOW_CAPTIONS_RIGHT[n - 1];
+
+  const playBtn = section.querySelector('[data-flow-play]');
+  if (playBtn && !playBtn.hidden) playBtn.innerHTML = aboutFlowPlaying ? '❚❚&nbsp;Pause' : '▶&nbsp;Play walkthrough';
+}
+
+function aboutFlowSetActive(n) {
+  n = Math.max(1, Math.min(6, n));
+  if (n === aboutFlowActive) return;
+  aboutFlowActive = n;
+  aboutFlowRender();
+}
+
+function aboutFlowStop() {
+  clearInterval(aboutFlowTimer);
+  aboutFlowTimer = null;
+  aboutFlowPlaying = false;
+  aboutFlowRender();
+}
+
+function aboutFlowStart() {
+  if (aboutFlowReducedMotion()) return;
+  clearInterval(aboutFlowTimer);
+  if (aboutFlowActive >= 6) aboutFlowActive = 1;
+  aboutFlowPlaying = true;
+  aboutFlowRender();
+  // Loops rather than stopping at step 6 — this section has no user-driven reason to end,
+  // it exists purely to demonstrate the divergence for as long as it's on screen.
+  aboutFlowTimer = setInterval(() => {
+    aboutFlowActive = aboutFlowActive >= 6 ? 1 : aboutFlowActive + 1;
+    aboutFlowRender();
+  }, 1200);
+}
+
+function aboutFlowScrubTo(clientX) {
+  const section = root.querySelector('.about-flow');
+  const track = section && section.querySelector('[data-flow-scrub]');
+  if (!track) return;
+  const r = track.getBoundingClientRect();
+  const inner = r.width - 30;
+  const t = (clientX - r.left - 15) / (inner || 1);
+  aboutFlowSetActive(Math.round(Math.max(0, Math.min(1, t)) * 5) + 1);
+}
+
+function aboutFlowUserInterrupt() {
+  aboutFlowUserPaused = true;
+  aboutFlowStop();
+}
+
+function setupAboutFlow() {
+  teardownAboutFlow();
+  const section = root.querySelector('.about-flow');
+  if (!section) return;
+
+  const reduced = aboutFlowReducedMotion();
+  const playBtn = section.querySelector('[data-flow-play]');
+  const note = section.querySelector('[data-flow-reduced-note]');
+  if (reduced) {
+    aboutFlowActive = 2; // land on the moment of divergence, no motion
+    aboutFlowPlaying = false;
+    if (note) note.hidden = false;
+  } else {
+    if (playBtn) playBtn.hidden = false;
+  }
+  aboutFlowRender();
+
+  if (playBtn) {
+    playBtn.addEventListener('click', () => {
+      if (aboutFlowPlaying) { aboutFlowUserPaused = true; aboutFlowStop(); }
+      else { aboutFlowUserPaused = false; aboutFlowStart(); }
+    });
+  }
+  section.querySelectorAll('[data-flow-dot]').forEach(dot => {
+    dot.addEventListener('click', () => { aboutFlowUserInterrupt(); aboutFlowSetActive(Number(dot.dataset.flowDot)); });
+  });
+  section.querySelectorAll('[data-flow-node]').forEach(node => {
+    node.addEventListener('click', () => { aboutFlowUserInterrupt(); aboutFlowSetActive(Number(node.dataset.idx) + 1); });
+  });
+  const scrub = section.querySelector('[data-flow-scrub]');
+  if (scrub) {
+    scrub.addEventListener('pointerdown', (e) => {
+      aboutFlowUserInterrupt();
+      aboutFlowDragging = true;
+      aboutFlowScrubTo(e.clientX);
+      window.addEventListener('pointermove', aboutFlowOnMove);
+      window.addEventListener('pointerup', aboutFlowOnUp);
+    });
+  }
+
+  if (reduced || !('IntersectionObserver' in window)) return;
+
+  // Autoplay starts the moment the section is actually visible (including immediately, if
+  // it's already in the initial viewport) and pauses while scrolled away — never a click
+  // required, never animating a section nobody can see.
+  aboutFlowVisibilityObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        if (!aboutFlowUserPaused && !aboutFlowPlaying) aboutFlowStart();
+      } else if (aboutFlowPlaying) {
+        clearInterval(aboutFlowTimer);
+        aboutFlowTimer = null;
+        aboutFlowPlaying = false;
+        aboutFlowRender();
+      }
+    });
+  }, { threshold: 0.4 });
+  aboutFlowVisibilityObserver.observe(section);
+}
+
+if (typeof MutationObserver !== 'undefined') {
+  const aboutObserver = new MutationObserver(() => {
+    if (state.view !== 'about') {
+      teardownAboutStages(); teardownAboutReveals(); teardownAboutFlow();
+      aboutFlowActive = 1; aboutFlowPlaying = false; aboutFlowUserPaused = false;
+      return;
+    }
+    const page = root.querySelector('.about-page');
+    if (!page) return;
+    setupAboutStages();
+    setupAboutReveals();
+    setupAboutFlow();
+  });
+  aboutObserver.observe(root, { childList: true });
 }
 
 // ===================== INIT =====================

@@ -7,8 +7,20 @@ import { checkEligibility } from './rules.js';
 import { generateSuggestion } from './correction.js';
 
 const app = express();
-app.use(cors({ origin: 'http://localhost:5173' }));
+app.use(cors({ origin: true }));
 app.use(express.json());
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+  res.json({ user: { name: 'Arjun Sharma', email, role: 'Practice administrator', practice: 'Northstar Family Practice' }, demo: true });
+});
+
+app.post('/api/auth/signup', (req, res) => {
+  const { name, email, password } = req.body || {};
+  if (!name || !email || !password) return res.status(400).json({ error: 'name, email, and password are required' });
+  res.status(201).json({ user: { name, email, role: 'Practice administrator', practice: 'Northstar Family Practice' }, demo: true });
+});
 
 function now() {
   return new Date().toISOString();
@@ -78,8 +90,11 @@ app.post('/api/intake', async (req, res) => {
 });
 
 app.get('/api/patients', (req, res) => {
-  const patients = db.prepare(`SELECT patients.*, payers.name AS payer_name
+  const patients = db.prepare(`SELECT patients.*, payers.name AS payer_name,
+      flags.field AS flag_field, flags.rule_violated AS flag_rule, flags.expected AS flag_expected,
+      flags.actual AS flag_actual, flags.suggestion AS flag_suggestion
     FROM patients LEFT JOIN payers ON payers.id = patients.payer_id
+    LEFT JOIN flags ON flags.patient_id = patients.id
     ORDER BY patients.created_at DESC`).all();
   res.json(patients);
 });
