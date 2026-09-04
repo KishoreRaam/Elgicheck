@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import db from './db.js';
 import { checkEligibility } from './rules.js';
 import { generateSuggestion } from './correction.js';
+import { checkCoverage, eligibilityMode } from './stedi.js';
 
 const app = express();
 app.use(cors({ origin: true }));
@@ -171,12 +172,54 @@ app.post('/api/patients/:id/confirm', async (req, res) => {
   res.json({ status: 'flagged', flag });
 });
 
+// Second-stage check: only ever called after a Member ID already passed its payer format
+// regex. Confirms real coverage status with the payer via Stedi (or a deterministic mock —
+// see server/stedi.js). This is the ONLY place STEDI_API_KEY or a Stedi network call exists;
+// the browser never talks to Stedi directly.
+app.post('/api/check-eligibility', async (req, res) => {
+  const { payer, memberId, firstName, lastName, dob } = req.body || {};
+  if (!payer || !memberId) {
+    return res.status(400).json({ error: 'payer and memberId are required' });
+  }
+  const result = await checkCoverage({ payer, memberId, firstName, lastName, dob });
+  res.json(result);
+});
+
 app.get('/api/payers', (req, res) => {
   const payers = db.prepare('SELECT * FROM payers').all();
   res.json(payers);
 });
 
+// Simple GROUP BY aggregation over the flags table — no ML, no prediction, just counts.
+// A flags row is created the first time a patient fails a check and is updated in place on
+// every re-check, so this reflects every patient that has ever been flagged (not just the
+// ones still unresolved), which is what makes it useful as a historical pattern view.
+app.get('/api/insights', (req, res) => {
+  const totalPatients = db.prepare('SELECT COUNT(*) AS n FROM patients').get().n;
+  const totalFlagged = db.prepare('SELECT COUNT(*) AS n FROM flags').get().n;
+
+  const byField = db.prepare(
+    'SELECT field, COUNT(*) AS count FROM flags GROUP BY field ORDER BY count DESC'
+  ).all();
+
+  const byPayer = db.prepare(`
+    SELECT payers.name AS payer, COUNT(*) AS count
+    FROM flags
+    JOIN patients ON patients.id = flags.patient_id
+    JOIN payers ON payers.id = patients.payer_id
+    GROUP BY payers.name
+    ORDER BY count DESC
+  `).all();
+
+  const byCarc = db.prepare(
+    'SELECT carc_code AS code, COUNT(*) AS count FROM flags GROUP BY carc_code ORDER BY count DESC'
+  ).all();
+
+  res.json({ totalPatients, totalFlagged, byField, byPayer, byCarc });
+});
+
 const PORT = 3001;
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
+  console.log(`[stedi] Eligibility checks running in ${eligibilityMode.toUpperCase()} mode.`);
 });

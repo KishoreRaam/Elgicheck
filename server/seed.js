@@ -23,6 +23,14 @@ const CONFIRMED_PATIENTS = [
   { id: 'p6', name: 'Kim, Soo-jin', dob: '1990-04-11', payer_id: 'cigna', member_id: 'U71230045' },
   { id: 'p7', name: 'Brooks, Daniel', dob: '1969-06-19', payer_id: 'bcbs', member_id: 'BCT004521190' },
   { id: 'p8', name: 'Torres, Miguel', dob: '1982-10-06', payer_id: 'kaiser', member_id: '8890041267' },
+  { id: 'p13', name: 'Reddy, Ananya', dob: '1994-05-12', payer_id: 'aetna', member_id: 'AE-4521-B' },
+  { id: 'p14', name: 'Fernandes, Lucas', dob: '1988-02-28', payer_id: 'uhc', member_id: '785412093' },
+  { id: 'p15', name: 'Whitfield, Grace', dob: '1975-09-03', payer_id: 'cigna', member_id: 'U88213045' },
+  { id: 'p16', name: 'Osei, Kwame', dob: '1992-11-19', payer_id: 'bcbs', member_id: 'BXR009812345' },
+  { id: 'p17', name: 'Alvarez, Sofia', dob: '1980-06-07', payer_id: 'humana', member_id: 'H83920156' },
+  { id: 'p18', name: 'Park, Min-jun', dob: '1997-01-25', payer_id: 'kaiser', member_id: '7723560194' },
+  { id: 'p19', name: 'Dubois, Camille', dob: '1969-04-30', payer_id: 'aetna', member_id: 'AE-2290-D' },
+  { id: 'p20', name: 'Singh, Arjun', dob: '1985-08-14', payer_id: 'uhc', member_id: '601234789' },
 ];
 
 const FLAGGED_PATIENTS = [
@@ -30,6 +38,10 @@ const FLAGGED_PATIENTS = [
   { id: 'p10', name: 'Delacroix, Marie', dob: '1965-05-30', payer_id: 'bcbs', member_id: 'TX9912003', policy_status: 'active' },
   { id: 'p11', name: 'Silva, Ana', dob: '1988-09-25', payer_id: 'uhc', member_id: '4432-119', policy_status: 'active' },
   { id: 'p12', name: 'Hassan, Layla', dob: '1993-01-28', payer_id: 'humana', member_id: 'H22050991', policy_status: 'expired' },
+  { id: 'p21', name: 'Moreno, Diego', dob: '1990-03-22', payer_id: 'cigna', member_id: '712345678', policy_status: 'active' },
+  { id: 'p22', name: 'Ibrahim, Amina', dob: '1978-12-11', payer_id: 'bcbs', member_id: 'BX12345678', policy_status: 'active' },
+  { id: 'p23', name: 'Novak, Petra', dob: '1993-07-05', payer_id: 'kaiser', member_id: '88134502', policy_status: 'active' },
+  { id: 'p24', name: 'Thompson, Grace', dob: '1971-10-09', payer_id: 'humana', member_id: 'H12345678', policy_status: 'expired' },
 ];
 
 function reset() {

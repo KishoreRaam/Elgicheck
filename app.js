@@ -41,6 +41,30 @@ function seedPatients() {
       'There is an extra letter and the numeric body is short. Humana Gold expects a single leading H and eight digits. Suggested correction: H22050001. Confirm to re-verify.',
       'H22050001'),
     C('Torres, Miguel', '1982-10-06', 'Kaiser', '8890041267', 'confirmed'),
+    C('Reddy, Ananya', '1994-05-12', 'Aetna PPO', 'AE-4521-B', 'confirmed'),
+    C('Fernandes, Lucas', '1988-02-28', 'UnitedHealthcare', '785412093', 'confirmed'),
+    C('Whitfield, Grace', '1975-09-03', 'Cigna OAP', 'U88213045', 'confirmed'),
+    C('Osei, Kwame', '1992-11-19', 'BCBS TX', 'BXR009812345', 'confirmed'),
+    C('Alvarez, Sofia', '1980-06-07', 'Humana Gold', 'H83920156', 'confirmed'),
+    C('Park, Min-jun', '1997-01-25', 'Kaiser', '7723560194', 'confirmed'),
+    C('Dubois, Camille', '1969-04-30', 'Aetna PPO', 'AE-2290-D', 'confirmed'),
+    C('Singh, Arjun', '1985-08-14', 'UnitedHealthcare', '601234789', 'confirmed'),
+    F('Moreno, Diego', '1990-03-22', 'Cigna OAP', '712345678',
+      { field: 'member_id', rule: 'cigna.format', expected: 'U + 8 digits', actual: '712345678  (missing U prefix · 9 digits)' },
+      'The value has no leading U and is nine digits long. Cigna OAP expects a leading U followed by eight digits. Suggested correction: U71234567. Confirm to re-verify.',
+      'U71234567'),
+    F('Ibrahim, Amina', '1978-12-11', 'BCBS TX', 'BX12345678',
+      { field: 'member_id', rule: 'bcbs.prefix', expected: 'AAA + 9 digits  (12 chars)', actual: 'BX12345678  (2-letter prefix · 8 digits)' },
+      'The prefix is two letters and the numeric body is short. BCBS TX uses a three-letter plan prefix plus nine digits. Suggested correction: BXR123456789. Confirm to re-verify.',
+      'BXR123456789'),
+    F('Novak, Petra', '1993-07-05', 'Kaiser', '88134502',
+      { field: 'member_id', rule: 'kaiser.length', expected: '10 digits  (no separators)', actual: '88134502  (8 digits, missing 2)' },
+      'The value is only eight digits. Kaiser expects exactly ten numeric digits. Suggested correction: 8813450256. Confirm to re-verify.',
+      '8813450256'),
+    F('Thompson, Grace', '1971-10-09', 'Humana Gold', 'HG-4471',
+      { field: 'member_id', rule: 'humana.format', expected: 'H + 8 digits', actual: 'HG-4471  (extra alpha · 4 digits)' },
+      'There is an extra letter and the numeric body is short. Humana Gold expects a single leading H and eight digits. Suggested correction: H44710001. Confirm to re-verify.',
+      'H44710001'),
   ];
   return raw.map((r, i) => ({
     id: 'p' + i,
@@ -52,6 +76,27 @@ function seedPatients() {
 }
 
 const STATUS_ORDER = { flagged: 0, pending: 1, confirmed: 2 };
+
+// Single source of truth for the avg-rework-cost figure — quoted in the Overview hero copy,
+// and used everywhere a $ amount is computed from a flag count (Profile leakage, Insights),
+// so a demo walkthrough never shows two different numbers for the same thing.
+const REWORK_COST_PER_FLAG = 2075;
+
+// CARC = Claim Adjustment Reason Code, the code a payer's 835 remittance carries when it
+// denies or adjusts a claim. CO-16 and CO-27 come from this app's format/policy rule checks;
+// CO-27 and CO-31 also come from the real-time coverage check (Stage 2) once a Member ID has
+// passed format — 'coverage_inactive' maps to CO-27 (policy not active), 'name_mismatch' maps
+// to CO-31 (identifiers don't match the payer's member record).
+const CARC_CODES = {
+  'CO-16': "Claim/service lacks information needed for adjudication — a required data element is missing or invalid.",
+  'CO-27': 'Expenses incurred after coverage terminated — the policy was not active on the date of service.',
+  'CO-31': "Patient cannot be identified as our insured — the identifiers submitted don't match the payer's member record.",
+};
+function carcForField(field) {
+  if (field === 'policy_status' || field === 'coverage_inactive') return 'CO-27';
+  if (field === 'member_id') return 'CO-16';
+  return 'CO-31';
+}
 
 // ===================== HELPERS =====================
 function escapeHtml(s) {
@@ -120,6 +165,7 @@ let state = {
   selectedId: null,
   detail: null,
   drawerId: null,
+  retryingId: null,
   paletteOpen: false,
   paletteQuery: '',
   paletteSel: 0,
@@ -169,6 +215,46 @@ async function apiRequest(path, options = {}) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
   return body;
+}
+
+// Stage 2 of verification: only ever called after a Member ID has already passed its payer
+// format regex. The browser never talks to Stedi directly — this hits our own backend, which
+// hits Stedi (or a deterministic mock — see server/stedi.js). Never throws to the caller;
+// any network failure resolves to { status: 'check_failed' } so it can never be mistaken for
+// a real "inactive" result.
+async function checkEligibilityApi({ payer, memberId, firstName, lastName, dob }) {
+  try {
+    return await apiRequest('/api/check-eligibility', {
+      method: 'POST',
+      body: JSON.stringify({ payer, memberId, firstName, lastName, dob }),
+    });
+  } catch (error) {
+    return { status: 'check_failed', planName: null, nameMatch: false, raw: { error: error.message } };
+  }
+}
+
+// The intake form only collects a single "Last, First" name field — split it for the
+// coverage check API, which (like Stedi) wants first/last separately.
+function splitName(fullName) {
+  const s = (fullName || '').trim();
+  if (s.includes(',')) {
+    const [last, first] = s.split(',').map(x => x.trim());
+    return { firstName: first || '', lastName: last || '' };
+  }
+  const parts = s.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return { firstName: parts.slice(0, -1).join(' '), lastName: parts[parts.length - 1] };
+  return { firstName: '', lastName: s };
+}
+
+function isCoverageDiag(diag) {
+  return !!diag && (diag.field === 'name_mismatch' || diag.field === 'coverage_inactive');
+}
+
+// 'check_failed' (network/timeout/HTTP error) carries raw.error from our own backend;
+// 'unknown' (a 200 the payer itself rejected, e.g. member not found) carries Stedi's raw
+// response instead, whose reason lives in errors[0].description.
+function describeCheckFailure(result) {
+  return result.raw?.error || result.raw?.errors?.[0]?.description || 'The eligibility check with the payer did not complete.';
 }
 
 function normalizeApiPatients(rows) {
@@ -236,15 +322,7 @@ function submitIntake() {
     const ok = def && def.re.test(val);
     const id = 'm' + Date.now();
     const base = { id, name: name.trim(), dob, payer, member: val, mrn: String(49000 + Math.floor(Math.random() * 900)), updated: 'just now', ts: 0, origin: 'manual' };
-    if (ok) {
-      setState(s => ({
-        submitting: false, view: 'queue',
-        patients: [{ ...base, status: 'confirmed' }, ...s.patients],
-        form: { name: '', dob: '', payer: '', memberId: '' }, err: {},
-      }));
-      flashRows([id]);
-      pushToast('Eligibility confirmed', name.trim() + ' added to the queue.', '#22C55E');
-    } else {
+    if (!ok) {
       const diag = {
         field: 'member_id',
         rule: (def ? def.name.split(' ')[0].toLowerCase() : 'payer') + '.format',
@@ -262,13 +340,74 @@ function submitIntake() {
         form: { name: '', dob: '', payer: '', memberId: '' }, err: {},
       }));
       setTimer('sug', () => setState(s => ({ detail: { ...s.detail, sugLoading: false } })), 1400);
+      return;
     }
+    // Format passed — Stage 2: confirm real coverage with the payer before marking confirmed.
+    // `submitting` stays true (button already reads "Checking eligibility…") through the call.
+    runIntakeCoverageCheck(base);
   }, 850);
 }
 
+async function runIntakeCoverageCheck(base) {
+  const { firstName, lastName } = splitName(base.name);
+  const result = await checkEligibilityApi({ payer: base.payer, memberId: base.member, firstName, lastName, dob: base.dob });
+
+  if (result.status === 'active' && result.nameMatch) {
+    setState(s => ({
+      submitting: false, view: 'queue',
+      patients: [{ ...base, status: 'confirmed', planName: result.planName }, ...s.patients],
+      form: { name: '', dob: '', payer: '', memberId: '' }, err: {},
+    }));
+    flashRows([base.id]);
+    pushToast('Eligibility confirmed', base.name + ' added to the queue.', '#22C55E');
+    return;
+  }
+
+  if (result.status === 'active' && !result.nameMatch) {
+    routeIntakeToFlagged(base, {
+      field: 'name_mismatch',
+      rule: 'coverage.name_match',
+      expected: `Payer record matches patient name "${base.name}"`,
+      actual: 'The payer returned a different subscriber name for this Member ID.',
+    }, 'The Member ID matches an active policy, but the name on file with the payer doesn\'t match the name entered. Verify the patient\'s identity — or correct a typo in the name — before re-checking.');
+    return;
+  }
+
+  if (result.status === 'inactive') {
+    routeIntakeToFlagged(base, {
+      field: 'coverage_inactive',
+      rule: 'coverage.active_policy',
+      expected: 'Active coverage on the date of service',
+      actual: 'The payer reports this policy is not currently active.',
+    }, 'This Member ID is correctly formatted, but the payer reports the policy is not active. Confirm with the patient or front desk before proceeding.');
+    return;
+  }
+
+  // 'unknown' or 'check_failed' — the check itself didn't succeed. Never flag on ambiguity;
+  // keep the record pending with a retry action instead.
+  setState(s => ({
+    submitting: false, view: 'queue',
+    patients: [{ ...base, status: 'pending', checkReason: describeCheckFailure(result) }, ...s.patients],
+    form: { name: '', dob: '', payer: '', memberId: '' }, err: {},
+  }));
+  pushToast('Couldn\'t verify coverage', base.name + ' added as Pending — retry the check from the queue.', '#F59E0B');
+}
+
+function routeIntakeToFlagged(base, diag, suggestion) {
+  const rec = { ...base, status: 'flagged', diag, suggestion, suggested: null };
+  setState(s => ({
+    submitting: false, view: 'flagged', selectedId: base.id,
+    detail: { phase: 'idle', editing: false, editValue: '', sugLoading: false, attempts: [] },
+    patients: [rec, ...s.patients],
+    form: { name: '', dob: '', payer: '', memberId: '' }, err: {},
+  }));
+}
+
 function openFlagged(id) {
-  setState({ view: 'flagged', selectedId: id, detail: { phase: 'idle', editing: false, editValue: '', sugLoading: true, attempts: [] } });
-  setTimer('sug', () => setState(s => ({ detail: { ...s.detail, sugLoading: false } })), 1400);
+  const rec = state.patients.find(p => p.id === id);
+  const coverageFlag = isCoverageDiag(rec && rec.diag);
+  setState({ view: 'flagged', selectedId: id, detail: { phase: 'idle', editing: false, editValue: '', sugLoading: !coverageFlag, attempts: [] } });
+  if (!coverageFlag) setTimer('sug', () => setState(s => ({ detail: { ...s.detail, sugLoading: false } })), 1400);
 }
 
 function startEdit() {
@@ -280,29 +419,22 @@ function cancelEdit() { setState(s => ({ detail: { ...s.detail, editing: false, 
 function confirmReverify() {
   const rec = getFlaggedRecord();
   if (!rec) return;
-  const value = state.detail.editing ? state.detail.editValue.trim() : rec.suggested;
+  const coverageFlag = isCoverageDiag(rec.diag);
+  const fallback = coverageFlag ? rec.member : rec.suggested;
+  const value = state.detail.editing ? state.detail.editValue.trim() : fallback;
   reverify(value);
 }
 
 function reverify(value) {
-  setState(s => ({ detail: { ...s.detail, phase: 'reverifying' } }));
+  setState(s => ({ detail: { ...s.detail, phase: 'reverifying', checkError: null } }));
   setTimer('reverify', () => {
     const rec = getFlaggedRecord();
     if (!rec) return;
     const def = PAYERS.find(p => p.name === rec.payer);
-    const ok = def && def.re.test((value || '').trim());
+    const trimmed = (value || '').trim();
+    const ok = def && def.re.test(trimmed);
     const now = Date.now();
-    if (ok) {
-      setState(s => ({
-        detail: { ...s.detail, phase: 'passed', attempts: [...(s.detail.attempts || []), { time: now, result: 'passed', value }] },
-        patients: s.patients.map(p => p.id === rec.id ? { ...p, status: 'confirmed', member: value.trim(), updated: 'just now', ts: 0 } : p),
-      }));
-      setTimer('redir', () => {
-        flashRows([rec.id]);
-        pushToast('Re-verification passed', rec.name + ' is now confirmed.', '#22C55E');
-        setState({ view: 'queue', selectedId: null, detail: null });
-      }, 1800);
-    } else {
+    if (!ok) {
       setState(s => ({
         detail: {
           ...s.detail, phase: 'failed', editing: true,
@@ -310,8 +442,65 @@ function reverify(value) {
           attempts: [...(s.detail.attempts || []), { time: now, result: 'failed', value }],
         },
       }));
+      return;
     }
+    // Format passed — Stage 2: re-confirm real coverage before marking confirmed.
+    setState(s => ({ detail: { ...s.detail, phase: 'checking_coverage' } }));
+    runReverifyCoverageCheck(rec.id, trimmed, now);
   }, 900);
+}
+
+async function runReverifyCoverageCheck(recId, value, attemptTime) {
+  const rec = state.patients.find(p => p.id === recId);
+  if (!rec) return;
+  const { firstName, lastName } = splitName(rec.name);
+  const result = await checkEligibilityApi({ payer: rec.payer, memberId: value, firstName, lastName, dob: rec.dob });
+
+  // The user may have navigated away from this record while the check was in flight.
+  if (state.selectedId !== recId || !state.detail) return;
+
+  if (result.status === 'active' && result.nameMatch) {
+    setState(s => ({
+      detail: { ...s.detail, phase: 'passed', attempts: [...(s.detail.attempts || []), { time: attemptTime, result: 'passed', value }] },
+      patients: s.patients.map(p => p.id === recId ? { ...p, status: 'confirmed', member: value, planName: result.planName, updated: 'just now', ts: 0 } : p),
+    }));
+    setTimer('redir', () => {
+      flashRows([recId]);
+      pushToast('Re-verification passed', rec.name + ' is now confirmed.', '#22C55E');
+      setState({ view: 'queue', selectedId: null, detail: null });
+    }, 1800);
+    return;
+  }
+
+  if (result.status === 'active' && !result.nameMatch) {
+    setState(s => ({
+      patients: s.patients.map(p => p.id === recId ? {
+        ...p, member: value,
+        diag: { field: 'name_mismatch', rule: 'coverage.name_match', expected: `Payer record matches patient name "${rec.name}"`, actual: 'The payer returned a different subscriber name for this Member ID.' },
+        suggestion: 'The Member ID matches an active policy, but the name on file with the payer doesn\'t match the name entered. Verify the patient\'s identity — or correct a typo in the name — before re-checking.',
+        suggested: null,
+      } : p),
+      detail: { ...s.detail, phase: 'idle', editing: false, attempts: [...(s.detail.attempts || []), { time: attemptTime, result: 'failed', value }] },
+    }));
+    return;
+  }
+
+  if (result.status === 'inactive') {
+    setState(s => ({
+      patients: s.patients.map(p => p.id === recId ? {
+        ...p, member: value,
+        diag: { field: 'coverage_inactive', rule: 'coverage.active_policy', expected: 'Active coverage on the date of service', actual: 'The payer reports this policy is not currently active.' },
+        suggestion: 'This Member ID is correctly formatted, but the payer reports the policy is not active. Confirm with the patient or front desk before proceeding.',
+        suggested: null,
+      } : p),
+      detail: { ...s.detail, phase: 'idle', editing: false, attempts: [...(s.detail.attempts || []), { time: attemptTime, result: 'failed', value }] },
+    }));
+    return;
+  }
+
+  // 'unknown' or 'check_failed' — don't touch the flag, just report that the check itself
+  // failed and let the user retry, distinct from a real re-verification failure.
+  setState(s => ({ detail: { ...s.detail, phase: 'idle', checkError: describeCheckFailure(result) } }));
 }
 
 function toggleRow(id) {
@@ -344,6 +533,60 @@ function bulkApply() {
   );
 }
 
+// Retries a Stage 2 coverage check for a 'pending' record (status distinct from 'flagged' —
+// the check itself failed, not the patient's data). Reachable from the queue drawer.
+async function retryCoverageCheck(id) {
+  const rec = state.patients.find(p => p.id === id);
+  if (!rec || state.retryingId) return;
+  setState({ retryingId: id });
+  const { firstName, lastName } = splitName(rec.name);
+  const result = await checkEligibilityApi({ payer: rec.payer, memberId: rec.member, firstName, lastName, dob: rec.dob });
+
+  if (result.status === 'active' && result.nameMatch) {
+    setState(s => ({
+      retryingId: null, drawerId: null,
+      patients: s.patients.map(p => p.id === id ? { ...p, status: 'confirmed', planName: result.planName, checkReason: null, updated: 'just now', ts: 0 } : p),
+    }));
+    flashRows([id]);
+    pushToast('Eligibility confirmed', rec.name + ' is now confirmed.', '#22C55E');
+    return;
+  }
+
+  if (result.status === 'active' && !result.nameMatch) {
+    setState(s => ({
+      retryingId: null, drawerId: null,
+      patients: s.patients.map(p => p.id === id ? {
+        ...p, status: 'flagged', checkReason: null,
+        diag: { field: 'name_mismatch', rule: 'coverage.name_match', expected: `Payer record matches patient name "${rec.name}"`, actual: 'The payer returned a different subscriber name for this Member ID.' },
+        suggestion: 'The Member ID matches an active policy, but the name on file with the payer doesn\'t match the name entered. Verify the patient\'s identity — or correct a typo in the name — before re-checking.',
+        suggested: null,
+      } : p),
+    }));
+    openFlagged(id);
+    return;
+  }
+
+  if (result.status === 'inactive') {
+    setState(s => ({
+      retryingId: null, drawerId: null,
+      patients: s.patients.map(p => p.id === id ? {
+        ...p, status: 'flagged', checkReason: null,
+        diag: { field: 'coverage_inactive', rule: 'coverage.active_policy', expected: 'Active coverage on the date of service', actual: 'The payer reports this policy is not currently active.' },
+        suggestion: 'This Member ID is correctly formatted, but the payer reports the policy is not active. Confirm with the patient or front desk before proceeding.',
+        suggested: null,
+      } : p),
+    }));
+    openFlagged(id);
+    return;
+  }
+
+  setState(s => ({
+    retryingId: null,
+    patients: s.patients.map(p => p.id === id ? { ...p, checkReason: describeCheckFailure(result) } : p),
+  }));
+  pushToast('Still couldn\'t verify', 'The eligibility check failed again — try again shortly.', '#F59E0B');
+}
+
 function doSort(key) {
   setState(s => ({ sortKey: key, sortDir: s.sortKey === key && s.sortDir === 'asc' ? 'desc' : 'asc' }));
 }
@@ -358,6 +601,7 @@ function getPaletteItems() {
     { icon: '☰', title: 'Go to Queue', sub: 'Live eligibility status', run: () => setState({ view: 'queue', paletteOpen: false }) },
     { icon: '⚙', title: 'Go to Payer Config', sub: 'Member ID format reference + tester', run: () => setState({ view: 'config', paletteOpen: false }) },
     { icon: '◉', title: 'Go to Practice Profile', sub: 'Revenue leakage and no-show signals', run: () => setState({ view: 'profile', paletteOpen: false }) },
+    { icon: '▤', title: 'Go to Insights', sub: 'Denial patterns — where errors cluster', run: () => setState({ view: 'insights', paletteOpen: false }) },
   ];
   const navFiltered = q ? navItems.filter(n => n.title.toLowerCase().includes(q)) : navItems;
   const patientItems = state.patients
@@ -391,6 +635,8 @@ function toastStack() {
 function drawerHtml() {
   const rec = state.patients.find(p => p.id === state.drawerId);
   if (!rec) return '';
+  const isPending = rec.status === 'pending';
+  const retrying = state.retryingId === rec.id;
   return `<div class="overlay" data-action="closeDrawer">
     <div class="drawer" data-action="noop">
       <div class="drawer-head">
@@ -407,12 +653,21 @@ function drawerHtml() {
           <div class="kv-row"><span>Payer</span><span>${escapeHtml(rec.payer)}</span></div>
           <div class="kv-row"><span>Member ID</span><span style="font-family:var(--font-mono)">${escapeHtml(rec.member)}</span></div>
           <div class="kv-row"><span>MRN</span><span>#${escapeHtml(rec.mrn)}</span></div>
+          ${rec.planName ? `<div class="kv-row"><span>Plan</span><span>${escapeHtml(rec.planName)}</span></div>` : ''}
           <div class="kv-row"><span>Source</span><span>${rec.origin === 'batch' ? 'Seeded batch' : 'Manual entry'}</span></div>
           <div class="kv-row"><span>Last updated</span><span>${escapeHtml(rec.updated)}</span></div>
         </div>
-        <div class="hint-text" style="margin-top:16px">This record is ${rec.status} — no action required. Flagged records open the full resolution view instead.</div>
+        ${isPending ? `
+          <div class="banner banner-warn" style="margin-top:16px;display:block">
+            <div class="banner-title">Coverage check didn't complete</div>
+            <div class="banner-sub" style="display:block;margin-top:3px">${escapeHtml(rec.checkReason || 'The eligibility check with the payer failed or timed out.')} This record isn't flagged — it just needs the check re-run.</div>
+          </div>
+        ` : `
+          <div class="hint-text" style="margin-top:16px">This record is ${rec.status} — no action required. Flagged records open the full resolution view instead.</div>
+        `}
       </div>
       <div class="drawer-foot">
+        ${isPending ? `<button class="btn btn-primary" data-action="retryCoverageCheck" data-id="${rec.id}" ${retrying ? 'disabled' : ''}>${retrying ? '<span class="spinner"></span> Retrying…' : 'Retry eligibility check'}</button>` : ''}
         <button class="btn btn-secondary" data-action="closeDrawer">Close</button>
       </div>
     </div>
@@ -451,6 +706,7 @@ const NAV_ICONS = {
   queue: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h12M3 9h12M3 13h7.5"/></svg>`,
   config: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 13.2V9.6M4.5 6.4V3.2M9 13.2V7.8M9 5.4V3.2M13.5 13.2V10.6M13.5 8.2V3.2"/><circle cx="4.5" cy="7.9" r="1.6"/><circle cx="9" cy="6.6" r="1.6"/><circle cx="13.5" cy="9.4" r="1.6"/></svg>`,
   profile: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6" r="2.7"/><path d="M3.4 15c.6-3.3 2.5-5 5.6-5s5 1.7 5.6 5"/></svg>`,
+  insights: `<svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 14.5V8M9 14.5V3.5M14.5 14.5v-5"/></svg>`,
 };
 
 function sidebarProgress() {
@@ -483,6 +739,7 @@ function sidebarHtml() {
     { key: 'intake', label: 'Intake' },
     { key: 'queue', label: 'Queue', badge: flaggedCount },
     { key: 'config', label: 'Payer Config' },
+    { key: 'insights', label: 'Insights' },
   ];
   return `<aside class="sidebar">
     <div class="sidebar-brand">
@@ -572,7 +829,7 @@ function pipelineBreadcrumb(activeKey, doneThrough) {
 // human is mid-CONFIRM; a reverify in flight is VERIFY; a pass marks the whole run done.
 function flaggedPipelineState(d) {
   if (!d || d.phase === 'passed') return { activeKey: null, doneThrough: PIPELINE_STEPS.length };
-  if (d.phase === 'reverifying') return { activeKey: 'verify', doneThrough: 5 };
+  if (d.phase === 'reverifying' || d.phase === 'checking_coverage') return { activeKey: 'verify', doneThrough: 5 };
   if (d.editing) return { activeKey: 'confirm', doneThrough: 4 };
   return { activeKey: 'flag', doneThrough: 3 };
 }
@@ -621,7 +878,7 @@ function practiceMetrics() {
   const total = state.patients.length;
   const flagged = state.patients.filter(p => p.status === 'flagged').length;
   const confirmed = state.patients.filter(p => p.status === 'confirmed').length;
-  const estimatedLeakage = flagged * 2075;
+  const estimatedLeakage = flagged * REWORK_COST_PER_FLAG;
   const payerCounts = state.patients.reduce((counts, patient) => {
     counts[patient.payer] = (counts[patient.payer] || 0) + 1;
     return counts;
@@ -675,7 +932,7 @@ function leakageSignals(compact = false) {
   const confirmedRate = metrics.total ? Math.round((metrics.confirmed / metrics.total) * 100) : 0;
   const topPayer = metrics.topPayer ? `${metrics.topPayer[0]} · ${metrics.topPayer[1]} records` : 'Waiting for intake data';
   if (compact) return `<div class="signal-grid signal-grid-compact">
-    <div class="signal-card signal-card-risk"><div class="signal-card-kicker">Estimated leakage at risk</div><strong>₹${exposure}</strong><span>${metrics.flagged} flagged records × ₹2,075 avg rework</span></div>
+    <div class="signal-card signal-card-risk"><div class="signal-card-kicker">Estimated leakage at risk</div><strong>₹${exposure}</strong><span>${metrics.flagged} flagged records × ₹${REWORK_COST_PER_FLAG.toLocaleString('en-IN')} avg rework</span></div>
     <div class="signal-card"><div class="signal-card-kicker">No-show pattern</div><strong>6.9%</strong><span>86 of 1,248 visits · down 1.8 pts vs last month</span></div>
     <div class="signal-card"><div class="signal-card-kicker">Clean intake rate</div><strong>${confirmedRate}%</strong><span>${metrics.confirmed} confirmed of ${metrics.total || 0} loaded records</span></div>
   </div>`;
@@ -719,6 +976,261 @@ function viewProfile() {
     <div class="profile-section-head"><div><h2>Revenue and capacity signals</h2><p>Patterns that help the front desk act before a denial or empty slot appears.</p></div><span class="profile-benchmark">Demo benchmark + live queue</span></div>
     ${leakageSignals()}
     <div class="profile-actions"><div><strong>Next best actions</strong><span>Small operational changes with measurable upside.</span></div><button class="btn btn-primary" data-action="nav" data-view="queue">Review ${metrics.flagged} flagged records →</button><button class="btn btn-secondary" data-action="nav" data-view="intake">Run new intake check</button></div>
+  </div>`;
+}
+
+// ===================== RENDER: INSIGHTS =====================
+// Every number here is a plain aggregation over state.patients — the same source Overview's
+// hero stat and Profile's leakage panel already read from, so nothing on this page can ever
+// drift out of sync with what those pages show. No prediction, no per-patient risk score:
+// see the framing callout at the bottom of viewInsights() for why that line matters.
+function computeInsights() {
+  const totalPatients = state.patients.length;
+  const everFlagged = state.patients.filter(p => p.diag);
+  const totalFlagged = everFlagged.length;
+
+  const fieldCounts = {};
+  const payerCounts = {};
+  const carcCounts = {};
+  everFlagged.forEach(p => {
+    const field = p.diag.field || 'unknown';
+    fieldCounts[field] = (fieldCounts[field] || 0) + 1;
+    payerCounts[p.payer] = (payerCounts[p.payer] || 0) + 1;
+    const carc = carcForField(field);
+    carcCounts[carc] = (carcCounts[carc] || 0) + 1;
+  });
+
+  const byField = Object.entries(fieldCounts).map(([field, count]) => ({ field, count })).sort((a, b) => b.count - a.count);
+  const byPayer = PAYERS.map(p => ({ payer: p.name, count: payerCounts[p.name] || 0 })).sort((a, b) => b.count - a.count);
+  const byCarc = Object.keys(CARC_CODES).map(code => ({ code, count: carcCounts[code] || 0 })).sort((a, b) => b.count - a.count);
+
+  return {
+    totalPatients, totalFlagged,
+    topField: byField[0] || null,
+    topPayer: byPayer.find(p => p.count > 0) || null,
+    estimatedCostAvoided: totalFlagged * REWORK_COST_PER_FLAG,
+    byField, byPayer, byCarc,
+  };
+}
+
+// ---- Insights → PDF export ----
+// Client-side only: html2canvas rasterizes whatever is currently in #insights-report — the
+// exact DOM computeInsights() just rendered from live state.patients — so there is no
+// separate data-fetch to keep in sync. Re-render the page (load a batch, confirm a flag,
+// anything that changes state.patients) and the very next export reflects it, because the
+// capture happens at click time against whatever render() last put on screen.
+async function exportInsightsPdf(btn) {
+  const target = document.getElementById('insights-report');
+  if (!target) return;
+  if (typeof html2canvas === 'undefined' || typeof window.jspdf === 'undefined') {
+    pushToast('Export unavailable', 'The PDF library failed to load — check your connection and try again.', '#F59E0B');
+    return;
+  }
+
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Generating…';
+
+  const hidden = Array.from(target.querySelectorAll('.no-export'));
+  const prevDisplay = hidden.map(el => el.style.display);
+  hidden.forEach(el => { el.style.display = 'none'; });
+
+  try {
+    const canvas = await html2canvas(target, { backgroundColor: '#ffffff', scale: 2, useCORS: true });
+
+    const { jsPDF } = window.jspdf;
+    // compress:true is not optional here — jsPDF defaults to false, which stores the embedded
+    // PNG as raw uncompressed RGBA pixel data (width × height × 4 bytes) instead of a compressed
+    // stream. For a single ~1200px-tall report at scale:2 that's a ~24MB PDF; with it, ~400KB.
+    const pdf = new jsPDF({ orientation: 'p', unit: 'pt', format: 'a4', compress: true });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 32;
+    const footerText = 'Generated from live intake data · Verified RCM Eligibility';
+
+    const now = new Date();
+    const headerDate = now.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+
+    const drawFooter = () => {
+      pdf.setFontSize(8.5);
+      pdf.setTextColor(161, 161, 170);
+      pdf.text(footerText, margin, pageHeight - 16);
+    };
+    const drawReportHeader = () => {
+      pdf.setFontSize(16);
+      pdf.setTextColor(11, 21, 38);
+      pdf.text('Verified — Denial Pattern Report', margin, 40);
+      pdf.setFontSize(10);
+      pdf.setTextColor(113, 113, 122);
+      pdf.text(`Generated ${headerDate}`, margin, 56);
+      pdf.setDrawColor(228, 228, 231);
+      pdf.line(margin, 66, pageWidth - margin, 66);
+    };
+
+    const usableWidth = pageWidth - margin * 2;
+    const imgWidth = usableWidth;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+    const pxPerPt = canvas.width / imgWidth;
+
+    const firstPageContentTop = 78;
+    const firstPageUsableHeight = pageHeight - firstPageContentTop - margin - 20;
+    const otherPageUsableHeight = pageHeight - margin * 2 - 20;
+
+    let srcYPx = 0;
+    let pageNum = 0;
+    while (srcYPx < canvas.height - 0.5 && pageNum < 25) {
+      const availableHeightPt = pageNum === 0 ? firstPageUsableHeight : otherPageUsableHeight;
+      let sliceHeightPx = Math.min(Math.round(availableHeightPt * pxPerPt), canvas.height - srcYPx);
+      sliceHeightPx = Math.max(1, sliceHeightPx);
+      const sliceHeightPt = sliceHeightPx / pxPerPt;
+
+      const sliceCanvas = document.createElement('canvas');
+      sliceCanvas.width = canvas.width;
+      sliceCanvas.height = sliceHeightPx;
+      sliceCanvas.getContext('2d').drawImage(canvas, 0, srcYPx, canvas.width, sliceHeightPx, 0, 0, canvas.width, sliceHeightPx);
+
+      if (pageNum > 0) pdf.addPage();
+      if (pageNum === 0) drawReportHeader();
+      const y = pageNum === 0 ? firstPageContentTop : margin;
+      pdf.addImage(sliceCanvas.toDataURL('image/png'), 'PNG', margin, y, imgWidth, sliceHeightPt);
+      drawFooter();
+
+      srcYPx += sliceHeightPx;
+      pageNum++;
+    }
+
+    const y4 = now.getFullYear(), m2 = String(now.getMonth() + 1).padStart(2, '0'), d2 = String(now.getDate()).padStart(2, '0');
+    const filename = `verified-denial-report-${y4}-${m2}-${d2}.pdf`;
+    pdf.save(filename);
+    pushToast('Report downloaded', `Saved as ${filename}`, '#22C55E');
+  } catch (err) {
+    pushToast('Export failed', 'Could not generate the PDF — please try again.', '#F59E0B');
+  } finally {
+    hidden.forEach((el, i) => { el.style.display = prevDisplay[i]; });
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+}
+
+function viewInsights() {
+  const ins = computeInsights();
+
+  if (!ins.totalPatients) {
+    return `<div class="view insights-view">
+      <div class="view-header">
+        <h1 class="page-title">Insights</h1>
+        <p class="page-sub">Denial patterns across everything Verified has checked so far.</p>
+      </div>
+      <div class="card"><div class="card-body" style="text-align:center;padding:48px 20px">
+        <p class="hint-text" style="margin:0 0 14px">Load a batch to see denial patterns here.</p>
+        <button class="btn btn-primary" data-action="loadBatch">Load 12 seeded patients</button>
+      </div></div>
+    </div>`;
+  }
+
+  const maxPayerCount = Math.max(1, ...ins.byPayer.map(p => p.count));
+
+  const topPayerShare = ins.topPayer ? Math.round((ins.topPayer.count / ins.totalFlagged) * 100) : 0;
+  const cleanRate = ins.totalPatients ? Math.round(((ins.totalPatients - ins.totalFlagged) / ins.totalPatients) * 100) : 0;
+
+  return `<div class="view insights-view" id="insights-report">
+    <div class="view-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap">
+      <div>
+        <h1 class="page-title">Insights</h1>
+        <p class="page-sub">Denial patterns across everything Verified has checked so far — where errors cluster, and what they'd have cost.</p>
+      </div>
+      <button class="btn btn-secondary no-export" data-action="exportInsightsPdf" id="exportPdfBtn" style="flex-shrink:0">
+        <svg viewBox="0 0 18 18" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2.5v9M9 11.5l-3.3-3.3M9 11.5l3.3-3.3"/><path d="M3 13.5v1.5a1 1 0 001 1h10a1 1 0 001-1v-1.5"/></svg>
+        Download PDF
+      </button>
+    </div>
+
+    <div class="stat-band insight-stat-band">
+      <div class="stat-tile">
+        <div class="stat-tile-label"><span class="stat-dot" style="background:var(--flagged-dot)"></span>Flagged records</div>
+        <div class="stat-tile-value">${ins.totalFlagged}<span style="font-size:15px;color:var(--zinc-400);font-weight:600"> / ${ins.totalPatients}</span></div>
+        <div class="stat-tile-sub">of all records processed</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile-label">Most common failure field</div>
+        <div class="stat-tile-value" style="font-size:19px;font-family:var(--font-mono)">${ins.topField ? escapeHtml(ins.topField.field) : '—'}</div>
+        <div class="stat-tile-sub">${ins.topField ? `${ins.topField.count} of ${ins.totalFlagged} flags` : 'no flags yet'}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile-label">Most common payer involved</div>
+        <div class="stat-tile-value" style="font-size:19px">${ins.topPayer ? escapeHtml(ins.topPayer.payer) : '—'}</div>
+        <div class="stat-tile-sub">${ins.topPayer ? `${ins.topPayer.count} of ${ins.totalFlagged} flags` : 'no flags yet'}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-tile-label">Rework cost avoided</div>
+        <div class="stat-tile-value">₹${ins.estimatedCostAvoided.toLocaleString('en-IN')}</div>
+        <div class="stat-tile-sub">${ins.totalFlagged} flags × ₹${REWORK_COST_PER_FLAG.toLocaleString('en-IN')} avg rework</div>
+      </div>
+    </div>
+
+    <div class="insights-content-grid">
+    <div class="insights-report-column">
+    <div class="card section-gap">
+      <div class="card-head">
+        <div class="card-title">Where errors cluster</div>
+        <div class="card-subtitle">Flags per payer, out of ${ins.totalFlagged} total.</div>
+      </div>
+      <div class="card-body insight-chart" data-insight-chart>
+        ${ins.byPayer.map(p => `
+          <div class="insight-bar-row">
+            <div class="insight-bar-label">${escapeHtml(p.payer)}</div>
+            <div class="insight-bar-track"><div class="insight-bar-fill" style="--w:${Math.round((p.count / maxPayerCount) * 100)}%"></div></div>
+            <div class="insight-bar-count">${p.count}</div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <div class="card section-gap">
+      <div class="card-head">
+        <div class="card-title">CARC code frequency</div>
+        <div class="card-subtitle">The denial codes these mismatches map to downstream — same codes as Overview's RCM cycle.</div>
+      </div>
+      <div class="card-body">
+        <div class="carc-list">
+          ${ins.byCarc.map(c => `
+            <div class="carc-row">
+              <span class="carc-chip">${escapeHtml(c.code)}</span>
+              <span class="carc-count">${c.count}</span>
+              <span class="carc-meaning">${escapeHtml(CARC_CODES[c.code])}</span>
+            </div>`).join('')}
+        </div>
+      </div>
+    </div>
+
+    <div class="callout-box">
+      <div class="callout-label">What this is — and isn't</div>
+      <p>This view surfaces the patterns already present in verified intake data — which payers and fields fail most often. With more volume, this same data becomes the training signal for predictive flagging: catching a likely-wrong Member ID format before a human even submits it, based on historical failure patterns for that payer. Today: pattern visibility. Next: predictive intervention.</p>
+    </div>
+    </div>
+
+    <aside class="insights-action-column">
+      <div class="insights-action-card insights-action-primary">
+        <div class="profile-kicker">Decision support</div><h2>What needs attention first?</h2>
+        <div class="insights-focus-value">${ins.topPayer ? escapeHtml(ins.topPayer.payer) : 'No pattern yet'}</div>
+        <p>${ins.topPayer ? `${topPayerShare}% of all flags come from this payer. Review its ID format at intake before expanding the next batch.` : 'Load a batch to surface payer-level patterns.'}</p>
+        <button class="btn btn-primary btn-block" data-action="nav" data-view="config">Review payer rules →</button>
+      </div>
+      <div class="insights-action-card">
+        <div class="profile-kicker">Operational impact</div><h2>Leakage snapshot</h2>
+        <div class="impact-row"><span>Preventable rework</span><strong>₹${ins.estimatedCostAvoided.toLocaleString('en-IN')}</strong></div>
+        <div class="impact-row"><span>Current clean rate</span><strong>${cleanRate}%</strong></div>
+        <div class="impact-row"><span>Flags needing review</span><strong>${ins.totalFlagged}</strong></div>
+        <div class="insights-progress"><i style="width:${cleanRate}%"></i></div>
+        <small class="insights-muted">Based on ${ins.totalPatients} records in the current queue.</small>
+      </div>
+      <div class="insights-action-card insights-next-card">
+        <div class="profile-kicker">Next best actions</div><h2>Close the loop</h2>
+        <div class="next-action"><i>1</i><span><b>Resolve flagged records</b><small>Clear the queue before claim submission.</small></span></div>
+        <div class="next-action"><i>2</i><span><b>Align staff on ${ins.topField ? escapeHtml(ins.topField.field) : 'format'} errors</b><small>Use the payer reference during intake.</small></span></div>
+        <button class="btn btn-secondary btn-block" data-action="nav" data-view="queue">Open patient queue →</button>
+      </div>
+    </aside>
+    </div>
   </div>`;
 }
 
@@ -1391,16 +1903,18 @@ function viewFlagged() {
   const def = PAYERS.find(p => p.name === rec.payer);
   const d = state.detail || {};
   const pf = flaggedPipelineState(d);
-  const diff = charDiff(rec.member, rec.suggested || '');
+  const coverageFlag = isCoverageDiag(rec.diag);
+  const diff = coverageFlag ? null : charDiff(rec.member, rec.suggested || '');
 
   const trail = [
     { label: rec.origin === 'batch' ? 'Batch ingested' : 'Manual entry submitted', time: rec.updated, state: 'done' },
-    { label: 'Eligibility check failed — routed to Flagged', time: rec.updated, state: 'flag' },
+    { label: coverageFlag ? 'Coverage check flagged this record — routed to Flagged' : 'Eligibility check failed — routed to Flagged', time: rec.updated, state: 'flag' },
     ...(d.attempts || []).map(a => ({
       label: a.result === 'passed' ? 'Re-verification passed' : `Re-verification failed — "${a.value}"`,
       time: relTime(a.time), state: a.result === 'passed' ? 'done' : 'flag',
     })),
-    ...(d.phase === 'reverifying' ? [{ label: 'Re-verifying…', time: 'now', state: 'active' }] : []),
+    ...(d.phase === 'reverifying' ? [{ label: 'Re-verifying format…', time: 'now', state: 'active' }] : []),
+    ...(d.phase === 'checking_coverage' ? [{ label: 'Checking coverage with payer…', time: 'now', state: 'active' }] : []),
   ];
 
   return `<div class="view">
@@ -1466,7 +1980,7 @@ function viewFlagged() {
           <div style="padding:16px 18px 14px">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:13px">
               <div style="width:17px;height:17px;border-radius:4px;background:var(--cyan-600);display:flex;align-items:center;justify-content:center"><div style="width:6px;height:6px;border-radius:1px;background:var(--cyan-50)"></div></div>
-              <div style="font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--cyan-600)">AI-generated suggestion</div>
+              <div style="font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--cyan-600)">${coverageFlag ? 'Payer eligibility response' : 'AI-generated suggestion'}</div>
             </div>
             ${d.sugLoading ? `
               <div style="display:flex;align-items:center;gap:11px;color:#0E7490;padding:4px 0 6px">
@@ -1476,10 +1990,12 @@ function viewFlagged() {
               <div style="animation:fadein .22s ease-out">
                 <div style="font-size:var(--fs-body);line-height:1.65;color:var(--zinc-900);margin-bottom:16px">${escapeHtml(rec.suggestion)}</div>
 
+                ${!coverageFlag ? `
                 <div style="background:var(--white);border:1px solid var(--cyan-border);border-radius:var(--radius-sm);padding:13px 15px;margin-bottom:${d.editing ? '14px' : '2px'}">
                   <div class="diff-line" style="margin-bottom:8px"><span class="diff-label">Entered</span>${renderDiffChars(diff.a)}</div>
                   <div class="diff-line"><span class="diff-label">Suggested</span>${renderDiffChars(diff.b)}</div>
                 </div>
+                ` : ''}
 
                 ${d.editing ? `
                   <div style="margin-top:4px">
@@ -1506,17 +2022,25 @@ function viewFlagged() {
             <div class="banner-sub" style="display:block;margin-top:3px">The value entered still fails the ${escapeHtml(rec.diag.rule)} rule. Edit the Member ID and re-verify.</div>
           </div>
         ` : ''}
+        ${d.checkError ? `
+          <div class="banner banner-warn section-gap" style="display:block">
+            <div class="banner-title">Couldn't verify — retry</div>
+            <div class="banner-sub" style="display:block;margin-top:3px">${escapeHtml(d.checkError)} This isn't a new flag — the format already checks out.</div>
+          </div>
+        ` : ''}
 
         ${d.phase !== 'passed' ? `
           <div style="display:flex;gap:10px;flex-wrap:wrap">
-            ${d.phase === 'reverifying' ? `
-              <button class="btn btn-primary" disabled><span class="spinner"></span> Re-verifying…</button>
+            ${(d.phase === 'reverifying' || d.phase === 'checking_coverage') ? `
+              <button class="btn btn-primary" disabled><span class="spinner"></span> ${d.phase === 'checking_coverage' ? 'Checking coverage…' : 'Re-verifying…'}</button>
             ` : `
-              <button class="btn btn-primary" data-action="confirmReverify">${d.editing ? 'Re-verify' : 'Confirm & re-verify'}</button>
+              <button class="btn btn-primary" data-action="confirmReverify">${d.editing ? 'Re-verify' : (coverageFlag ? 'Recheck coverage' : 'Confirm & re-verify')}</button>
               ${!d.editing ? `<button class="btn btn-secondary" data-action="startEdit">Edit manually</button>` : `<button class="btn btn-secondary" data-action="cancelEdit">Cancel edit</button>`}
             `}
           </div>
-          <div class="hint-text" style="margin-top:13px">The suggested value is never applied automatically — it takes effect only when you confirm or edit and re-verify.</div>
+          <div class="hint-text" style="margin-top:13px">${coverageFlag
+            ? 'Rechecking re-runs this Member ID and name against the payer. Edit manually first only if you believe the entered ID or name was wrong.'
+            : 'The suggested value is never applied automatically — it takes effect only when you confirm or edit and re-verify.'}</div>
         ` : ''}
       </div>
     </div>
@@ -1746,7 +2270,7 @@ function mountAuthScreen() {
 // ===================== APP ROOT =====================
 function App() {
   if (state.view === 'auth') return `${viewAuth()}${toastStack()}`;
-  const views = { about: viewAbout, overview: viewOverview, profile: viewProfile, intake: viewIntake, queue: viewQueue, flagged: viewFlagged, config: viewConfig };
+  const views = { about: viewAbout, overview: viewOverview, profile: viewProfile, intake: viewIntake, queue: viewQueue, flagged: viewFlagged, config: viewConfig, insights: viewInsights };
   const view = views[state.view] || viewAbout;
   return `${sidebarHtml()}<main>${view()}</main>${drawerHtml()}${toastStack()}${paletteHtml()}`;
 }
@@ -1810,10 +2334,12 @@ const Actions = {
   confirmReverify() { confirmReverify(); },
   openDrawer(el) { setState({ drawerId: el.dataset.id }); },
   closeDrawer() { setState({ drawerId: null }); },
+  retryCoverageCheck(el) { retryCoverageCheck(el.dataset.id); },
   dismissToast(el) { dismissToast(Number(el.dataset.tid)); },
   openPalette() { setState({ paletteOpen: true, paletteQuery: '', paletteSel: 0 }); },
   closePalette() { setState({ paletteOpen: false }); },
   paletteRun(el) { const items = getPaletteItems(); const it = items[Number(el.dataset.idx)]; if (it) it.run(); },
+  exportInsightsPdf(el) { exportInsightsPdf(el); },
   noop() {},
 
   authTab(el) {
@@ -2342,6 +2868,43 @@ if (typeof MutationObserver !== 'undefined') {
     setupAboutFlow();
   });
   aboutObserver.observe(root, { childList: true });
+}
+
+// ===================== INSIGHTS PAGE: bar chart reveal on scroll ====================
+// Same reasoning as overviewAnimated above: root.innerHTML is replaced wholesale on every
+// render(), so "has this already played" has to live in a variable outside the DOM. Plays
+// once per visit to Insights, reset the moment state.view leaves it.
+let insightsChartRevealed = false;
+let insightsChartObserver = null;
+function teardownInsightsChart() {
+  if (insightsChartObserver) { insightsChartObserver.disconnect(); insightsChartObserver = null; }
+}
+function setupInsightsChart() {
+  teardownInsightsChart();
+  const chart = root.querySelector('[data-insight-chart]');
+  if (!chart) return;
+  if (insightsChartRevealed || window.matchMedia('(prefers-reduced-motion: reduce)').matches || !('IntersectionObserver' in window)) {
+    chart.classList.add('is-revealed');
+    insightsChartRevealed = true;
+    return;
+  }
+  insightsChartObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      chart.classList.add('is-revealed');
+      insightsChartRevealed = true;
+      teardownInsightsChart();
+    });
+  }, { threshold: 0.3 });
+  insightsChartObserver.observe(chart);
+}
+
+if (typeof MutationObserver !== 'undefined') {
+  const insightsObserver = new MutationObserver(() => {
+    if (state.view !== 'insights') { teardownInsightsChart(); insightsChartRevealed = false; return; }
+    setupInsightsChart();
+  });
+  insightsObserver.observe(root, { childList: true });
 }
 
 // ===================== INIT =====================
